@@ -7437,6 +7437,36 @@ def _dimensioned_solid_spec(question) -> dict | None:
                 "unit": unit,
             }
 
+    # Cone with a smaller similar cone cut from the top / frustum context.
+    if "cone" in low and (
+        "similar cone" in low
+        or "cut off" in low
+        or "cut from the top" in low
+        or "frustum" in low
+    ):
+        whole_h = first([
+            r"(?:solid\\s+metal\\s+)?cone(?:\\s+of)?\\s+height\\s*(\\d+(?:\\.\\d+)?)",
+            r"original\\s+cone(?:\\s+has)?\\s+height\\s*(\\d+(?:\\.\\d+)?)",
+            r"height\\s*(?:is|=|of)?\\s*(\\d+(?:\\.\\d+)?)",
+        ])
+        small_h = first([
+            r"smaller\\s+similar\\s+cone.*?height\\s*(?:is|=|of)?\\s*(\\d+(?:\\.\\d+)?)",
+            r"small(?:er)?\\s+cone.*?height\\s*(?:is|=|of)?\\s*(\\d+(?:\\.\\d+)?)",
+        ])
+        radius = first([
+            r"radius\\s*(?:is|=|of)?\\s*(\\d+(?:\\.\\d+)?)",
+        ])
+        if whole_h and small_h:
+            spec = {
+                "type": "cone_similar_cut",
+                "height": whole_h,
+                "small_height": small_h,
+                "unit": unit,
+            }
+            if radius:
+                spec["radius"] = radius
+            return spec
+
     if "cone" in low:
         r = first([r"radius\s*(?:is|=|of)?\s*(\d+(?:\.\d+)?)"])
         h = first([r"height\s*(?:is|=|of)?\s*(\d+(?:\.\d+)?)"])
@@ -7550,11 +7580,80 @@ def render_dimensioned_solid_png(spec: dict, *, width=900, height=620) -> bytes:
         _draw_dimension(draw,(545,425),(635,370),_solid_label(D,unit),font)
 
     elif t == "cylinder":
-        R=_solid_num(spec.get("radius"),3); H=_solid_num(spec.get("height"),8)
-        c=_draw_cylinder(draw,390,150,90,250)
-        _draw_dimension(draw,(500,150),(500,400),_solid_label(H,unit),font)
-        draw.line((390,150,480,150),fill=(15,110,86),width=2)
-        draw.text((410,120),f"r = {_solid_label(R,unit)}",fill=(55,55,55),font=font)
+        R=_solid_num(spec.get("radius"),3)
+        H=_solid_num(spec.get("height"),8)
+        c=_draw_cylinder(draw,390,155,88,235)
+        _draw_dimension(draw,(505,155),(505,390),_solid_label(H,unit),font)
+
+        # Radius line + light leader, matching the supplied SVG style.
+        draw.line((390,155,478,155),fill=(15,110,86),width=2)
+        draw.line((445,155,610,115),fill=(145,145,145),width=1)
+        draw.text((620,108),f"r = {_solid_label(R,unit)}",fill=(55,55,55),font=font)
+
+    elif t == "cone_similar_cut":
+        H=_solid_num(spec.get("height"),12)
+        sh=_solid_num(spec.get("small_height"),4)
+        R=_solid_num(spec.get("radius"),None)
+
+        # Exam-style upright cone with a horizontal cut indicating the smaller similar cone.
+        cx=390
+        apex_y=455
+        top_y=120
+        rx=145
+        ry=38
+
+        # Main cone outline.
+        draw.ellipse(
+            (cx-rx, top_y-ry, cx+rx, top_y+ry),
+            fill=(250,250,250),
+            outline=(45,45,45),
+            width=2,
+        )
+        draw.line((cx-rx, top_y, cx, apex_y), fill=(45,45,45), width=2)
+        draw.line((cx+rx, top_y, cx, apex_y), fill=(45,45,45), width=2)
+
+        # Axis.
+        draw.line((cx, top_y, cx, apex_y), fill=(120,120,120), width=1)
+
+        # Similar-cone cut plane: distance from apex proportional to small height.
+        ratio = min(max(sh / H, 0.12), 0.82)
+        cut_y = apex_y - (apex_y-top_y) * ratio
+        cut_rx = max(28, int(rx * ratio))
+        cut_ry = max(9, int(ry * ratio))
+
+        draw.ellipse(
+            (cx-cut_rx, cut_y-cut_ry, cx+cut_rx, cut_y+cut_ry),
+            fill=(255,255,255),
+            outline=(75,75,75),
+            width=2,
+        )
+
+        # Dimension: original height.
+        _draw_dimension(
+            draw,
+            (cx+rx+55, top_y),
+            (cx+rx+55, apex_y),
+            _solid_label(H, unit),
+            font,
+        )
+
+        # Dimension: smaller similar cone height.
+        _draw_dimension(
+            draw,
+            (cx-cut_rx-55, cut_y),
+            (cx-cut_rx-55, apex_y),
+            _solid_label(sh, unit),
+            font,
+        )
+
+        if R:
+            draw.line((cx, top_y, cx+rx, top_y), fill=(75,75,75), width=1)
+            draw.text(
+                (cx+45, top_y-28),
+                f"r = {_solid_label(R,unit)}",
+                fill=(55,55,55),
+                font=font,
+            )
 
     elif t == "cone":
         R=_solid_num(spec.get("radius"),3)
@@ -8468,7 +8567,10 @@ def render_setter_preview(draft: ExamPaperDraft) -> None:
                             )
                         else:
                             st.warning("The function could not be rendered by either graph engine.")
-                elif getattr(q, "diagram_scene_3d", None) is not None:
+                elif (
+                    _dimensioned_solid_spec(q) is None
+                    and getattr(q, "diagram_scene_3d", None) is not None
+                ):
                     figure_number += 1
                     show_scene3d(
                         q.diagram_scene_3d,

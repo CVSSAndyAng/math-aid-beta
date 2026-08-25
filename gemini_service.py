@@ -2146,6 +2146,14 @@ GRAPH-CONSTRUCTION CONTRACT:
 
 
 3D-DIAGRAM CONTRACT:
+- Prefer the deterministic SOLID3D transport supplied in the teacher syllabus notes for standard
+  cylinders, cones, cuboids, cubes, triangular prisms and supported composite solids.
+- Use diagram_scene_3d only for spatial objects that cannot be represented by the deterministic
+  solid renderer.
+- Do not create giant generic wireframe cylinders/cones for ordinary mensuration questions.
+- Dimensions required by the question must be displayed beside the correct edges/radius/height.
+- For a cone with a smaller similar cone cut off, use a clean cone outline with a horizontal
+  cut-plane ellipse and clearly labelled heights, rather than drawing two unrelated cones.
 - For 3D-object questions, create exam-style black-line wireframe diagrams on white.
 - Match the supplied reference style: clean outlines, labelled vertices, dimensions beside
   the correct edges, and uncluttered perspective.
