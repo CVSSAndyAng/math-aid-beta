@@ -7257,6 +7257,501 @@ def render_exam_3d_wireframe_png(scene, *, width: int=960, height: int=620, padd
     buf=BytesIO(); img.save(buf,format="PNG"); return buf.getvalue()
 
 
+
+# ---------------------------------------------------------------------------
+# Deterministic dimensioned 3D solid renderer
+# ---------------------------------------------------------------------------
+
+_SOLID3D_TAG_RE = re.compile(r"(?is)\[SOLID3D\](.*?)\[/SOLID3D\]")
+
+_SOLID3D_GENERATION_REQUIREMENTS = """
+IMPORTANT DIMENSIONED 3D GEOMETRY REQUIREMENTS:
+- For questions involving cuboids, cubes, cylinders, cones, spheres, hemispheres,
+  triangular prisms or composite solids, provide a deterministic diagram specification.
+- Put the specification in diagram_spec using this exact transport form:
+
+  [SOLID3D]
+  type=composite_cylinder_cuboid
+  cuboid_length=12
+  cuboid_depth=8
+  cuboid_height=5
+  cylinder_radius=3
+  cylinder_height=10
+  unit=cm
+  [/SOLID3D]
+
+- Supported type values:
+  cuboid, cube, cylinder, cone, sphere, hemisphere, triangular_prism,
+  composite_cylinder_cuboid, composite_cone_cylinder,
+  composite_prism_cuboid, composite_cylinder_prism,
+  composite_cylinder_cuboid_prism.
+- Use only positive numerical dimensions.
+- Every dimension needed by the question must appear in the SOLID3D block.
+- The wording and the SOLID3D values must agree exactly.
+- For triangular prisms use:
+  prism_base, prism_triangle_height, prism_length.
+- For composite solids made from a cylinder, cuboid and triangular prism use:
+  cuboid_length, cuboid_depth, cuboid_height,
+  cylinder_radius, cylinder_height,
+  prism_base, prism_triangle_height, prism_length,
+  and placement values where needed.
+- Composite parts must touch along a clearly defined face or circular base.
+- Do not allow impossible overlaps or a mounted solid whose footprint is larger than
+  the supporting face unless the wording explicitly describes an overhang.
+- Questions may test volume, total surface area, exposed surface area, missing dimensions,
+  comparison of solids, reverse problems, or the volume/material removed or added.
+"""
+
+def _solid_num(value, default=None):
+    try:
+        x = float(str(value).strip())
+        if x > 0 and math.isfinite(x):
+            return x
+    except Exception:
+        pass
+    return default
+
+
+def _parse_solid3d_tag(text: str) -> dict | None:
+    source = str(text or "")
+    m = _SOLID3D_TAG_RE.search(source)
+    if not m:
+        return None
+    payload = {}
+    for raw in m.group(1).splitlines():
+        line = raw.strip()
+        if not line or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        payload[key.strip().lower()] = value.strip()
+    if "type" not in payload:
+        return None
+    return payload
+
+
+def _dimensioned_solid_spec(question) -> dict | None:
+    """Return a conservative, deterministic solid specification."""
+    diagram_text = str(getattr(question, "diagram_spec", "") or "")
+    tagged = _parse_solid3d_tag(diagram_text)
+    if tagged:
+        spec = dict(tagged)
+        spec["type"] = str(spec.get("type", "")).strip().lower()
+        spec["unit"] = str(spec.get("unit", "cm") or "cm").strip()
+        for key in list(spec):
+            if key not in {"type", "unit"}:
+                num = _solid_num(spec[key])
+                if num is not None:
+                    spec[key] = num
+        return spec
+
+    # Fallback parser for natural-language generated questions.
+    text = " ".join([
+        str(getattr(question, "stem_text", "") or ""),
+        str(getattr(question, "diagram_spec", "") or ""),
+        " ".join(str(getattr(p, "prompt_text", "") or "") for p in (getattr(question, "parts", []) or [])),
+    ])
+    low = text.lower()
+    unit_match = re.search(r"\b(mm|cm|m)\b", low)
+    unit = unit_match.group(1) if unit_match else "cm"
+
+    def first(patterns):
+        for pattern in patterns:
+            m = re.search(pattern, low, flags=re.I)
+            if m:
+                return _solid_num(m.group(1))
+        return None
+
+    # Composite cylinder on cuboid.
+    if "cylinder" in low and "cuboid" in low:
+        cuboid_dims = re.search(
+            r"cuboid(?:\s+\w+){0,5}?\s*(\d+(?:\.\d+)?)\s*(?:cm|m|mm)?\s*(?:by|×|x)\s*"
+            r"(\d+(?:\.\d+)?)\s*(?:cm|m|mm)?\s*(?:by|×|x)\s*(\d+(?:\.\d+)?)",
+            low,
+        )
+        radius = first([
+            r"cylinder(?:\s+\w+){0,5}?\s+radius\s*(?:is|=|of)?\s*(\d+(?:\.\d+)?)",
+            r"radius\s*(?:is|=|of)?\s*(\d+(?:\.\d+)?)",
+        ])
+        cyl_height = first([
+            r"cylinder(?:\s+\w+){0,6}?\s+height\s*(?:is|=|of)?\s*(\d+(?:\.\d+)?)",
+            r"height\s*(?:is|=|of)?\s*(\d+(?:\.\d+)?)",
+        ])
+        if cuboid_dims and radius and cyl_height:
+            return {
+                "type": "composite_cylinder_cuboid",
+                "cuboid_length": float(cuboid_dims.group(1)),
+                "cuboid_depth": float(cuboid_dims.group(2)),
+                "cuboid_height": float(cuboid_dims.group(3)),
+                "cylinder_radius": radius,
+                "cylinder_height": cyl_height,
+                "unit": unit,
+            }
+
+    # Cuboid / cube.
+    dims = re.search(
+        r"(?:cuboid|block)(?:\s+\w+){0,6}?\s*(\d+(?:\.\d+)?)\s*(?:cm|m|mm)?\s*(?:by|×|x)\s*"
+        r"(\d+(?:\.\d+)?)\s*(?:cm|m|mm)?\s*(?:by|×|x)\s*(\d+(?:\.\d+)?)",
+        low,
+    )
+    if dims:
+        return {
+            "type": "cuboid",
+            "length": float(dims.group(1)),
+            "depth": float(dims.group(2)),
+            "height": float(dims.group(3)),
+            "unit": unit,
+        }
+
+    if "cube" in low:
+        side = first([r"(?:side|edge)(?:\s+length)?\s*(?:is|=|of)?\s*(\d+(?:\.\d+)?)"])
+        if side:
+            return {"type": "cube", "side": side, "unit": unit}
+
+    # Cylinder / cone / hemisphere / sphere.
+    if "cylinder" in low:
+        r = first([r"radius\s*(?:is|=|of)?\s*(\d+(?:\.\d+)?)"])
+        h = first([r"height\s*(?:is|=|of)?\s*(\d+(?:\.\d+)?)"])
+        if r and h:
+            return {"type": "cylinder", "radius": r, "height": h, "unit": unit}
+
+    if "triangular prism" in low or "prism" in low:
+        base = first([
+            r"(?:triangular\s+)?prism(?:\s+\w+){0,5}?\s+base\s*(?:is|=|of)?\s*(\d+(?:\.\d+)?)",
+            r"base\s*(?:is|=|of)?\s*(\d+(?:\.\d+)?)",
+        ])
+        tri_h = first([
+            r"triangle(?:\s+\w+){0,3}?\s+height\s*(?:is|=|of)?\s*(\d+(?:\.\d+)?)",
+            r"perpendicular\s+height\s*(?:is|=|of)?\s*(\d+(?:\.\d+)?)",
+        ])
+        length = first([
+            r"prism(?:\s+\w+){0,5}?\s+length\s*(?:is|=|of)?\s*(\d+(?:\.\d+)?)",
+            r"length\s*(?:is|=|of)?\s*(\d+(?:\.\d+)?)",
+        ])
+        if base and tri_h and length:
+            return {
+                "type": "triangular_prism",
+                "base": base,
+                "triangle_height": tri_h,
+                "length": length,
+                "unit": unit,
+            }
+
+    if "cone" in low:
+        r = first([r"radius\s*(?:is|=|of)?\s*(\d+(?:\.\d+)?)"])
+        h = first([r"height\s*(?:is|=|of)?\s*(\d+(?:\.\d+)?)"])
+        slant = first([r"slant(?:\s+height)?\s*(?:is|=|of)?\s*(\d+(?:\.\d+)?)"])
+        if r and (h or slant):
+            spec = {"type": "cone", "radius": r, "unit": unit}
+            if h: spec["height"] = h
+            if slant: spec["slant_height"] = slant
+            return spec
+
+    if "hemisphere" in low or "hemi-sphere" in low:
+        r = first([r"radius\s*(?:is|=|of)?\s*(\d+(?:\.\d+)?)"])
+        if r:
+            return {"type": "hemisphere", "radius": r, "unit": unit}
+
+    if "sphere" in low:
+        r = first([r"radius\s*(?:is|=|of)?\s*(\d+(?:\.\d+)?)"])
+        if r:
+            return {"type": "sphere", "radius": r, "unit": unit}
+
+    return None
+
+
+def _solid_label(value, unit="cm") -> str:
+    x = float(value)
+    text = str(int(x)) if abs(x - round(x)) < 1e-9 else f"{x:g}"
+    return f"{text} {unit}"
+
+
+def _draw_dimension(draw, p1, p2, label, font, *, offset=(0,0), fill=(80,80,80)):
+    x1,y1 = p1; x2,y2 = p2
+    ox,oy = offset
+    x1 += ox; y1 += oy; x2 += ox; y2 += oy
+    draw.line((x1,y1,x2,y2), fill=fill, width=2)
+    # arrowheads
+    angle = math.atan2(y2-y1, x2-x1)
+    for x,y,a in [(x1,y1,angle),(x2,y2,angle+math.pi)]:
+        size=7
+        pts=[
+            (x, y),
+            (x+size*math.cos(a+0.55), y+size*math.sin(a+0.55)),
+            (x+size*math.cos(a-0.55), y+size*math.sin(a-0.55)),
+        ]
+        draw.line(pts+[pts[0]], fill=fill, width=2)
+    mx=(x1+x2)/2; my=(y1+y2)/2
+    bbox=draw.textbbox((0,0), label, font=font)
+    tw=bbox[2]-bbox[0]; th=bbox[3]-bbox[1]
+    draw.rectangle((mx-tw/2-4,my-th/2-3,mx+tw/2+4,my+th/2+3), fill="white")
+    draw.text((mx-tw/2,my-th/2), label, fill=(40,40,40), font=font)
+
+
+def _draw_cuboid_iso(draw, x, y, w, h, d, *, front=(217,233,249), side=(198,220,244), top=(232,242,252)):
+    dx=d; dy=-int(d*0.62)
+    draw.polygon([(x,y),(x+w,y),(x+w+dx,y+dy),(x+dx,y+dy)], fill=top, outline=(24,95,165))
+    draw.polygon([(x+w,y),(x+w,y+h),(x+w+dx,y+h+dy),(x+w+dx,y+dy)], fill=side, outline=(24,95,165))
+    draw.rectangle((x,y,x+w,y+h), fill=front, outline=(24,95,165))
+    return {"front_tl":(x,y),"front_tr":(x+w,y),"front_br":(x+w,y+h),"front_bl":(x,y+h),
+            "back_tr":(x+w+dx,y+dy),"back_br":(x+w+dx,y+h+dy)}
+
+
+def _draw_cylinder(draw, cx, top_y, radius_px, height_px):
+    ry=max(8,int(radius_px*0.34))
+    left=cx-radius_px; right=cx+radius_px
+    bottom_y=top_y+height_px
+    draw.rectangle((left,top_y,right,bottom_y), fill=(220,245,237), outline=(15,110,86))
+    draw.ellipse((left,top_y-ry,right,top_y+ry), fill=(225,248,240), outline=(15,110,86), width=2)
+    draw.arc((left,bottom_y-ry,right,bottom_y+ry), 0, 180, fill=(15,110,86), width=2)
+    draw.line((cx,top_y,right,top_y), fill=(15,110,86), width=2)
+    draw.ellipse((cx-2,top_y-2,cx+2,top_y+2), fill=(15,110,86))
+    return {"left":left,"right":right,"top_y":top_y,"bottom_y":bottom_y,"ry":ry,"cx":cx}
+
+
+def render_dimensioned_solid_png(spec: dict, *, width=900, height=620) -> bytes:
+    """Render a clean exam-style dimensioned 3D solid PNG."""
+    img=Image.new("RGB",(width,height),"white")
+    draw=ImageDraw.Draw(img)
+    font=ImageFont.load_default()
+    t=str(spec.get("type","")).lower()
+    unit=str(spec.get("unit","cm"))
+
+    if t == "composite_cylinder_cuboid":
+        L=_solid_num(spec.get("cuboid_length"),12)
+        D=_solid_num(spec.get("cuboid_depth"),8)
+        H=_solid_num(spec.get("cuboid_height"),5)
+        R=_solid_num(spec.get("cylinder_radius"),3)
+        CH=_solid_num(spec.get("cylinder_height"),10)
+
+        # Geometry closely follows the supplied SVG logic.
+        cub=_draw_cuboid_iso(draw,220,330,300,130,80)
+        cyl=_draw_cylinder(draw,370,145,65,180)
+
+        _draw_dimension(draw,(220,485),(520,485),_solid_label(L,unit),font)
+        _draw_dimension(draw,(205,330),(205,460),_solid_label(H,unit),font)
+        _draw_dimension(draw,(535,475),(615,425),_solid_label(D,unit),font)
+        _draw_dimension(draw,(455,145),(455,325),_solid_label(CH,unit),font)
+        # radius leader
+        draw.line((370,145,435,145),fill=(15,110,86),width=2)
+        draw.line((410,145,610,105),fill=(125,125,125),width=1)
+        draw.text((620,98),f"r = {_solid_label(R,unit)}",fill=(55,55,55),font=font)
+
+    elif t in {"cuboid","cube"}:
+        if t=="cube":
+            L=D=H=_solid_num(spec.get("side"),5)
+        else:
+            L=_solid_num(spec.get("length"),10)
+            D=_solid_num(spec.get("depth"),6)
+            H=_solid_num(spec.get("height"),5)
+        cub=_draw_cuboid_iso(draw,230,240,300,170,90)
+        _draw_dimension(draw,(230,440),(530,440),_solid_label(L,unit),font)
+        _draw_dimension(draw,(210,240),(210,410),_solid_label(H,unit),font)
+        _draw_dimension(draw,(545,425),(635,370),_solid_label(D,unit),font)
+
+    elif t == "cylinder":
+        R=_solid_num(spec.get("radius"),3); H=_solid_num(spec.get("height"),8)
+        c=_draw_cylinder(draw,390,150,90,250)
+        _draw_dimension(draw,(500,150),(500,400),_solid_label(H,unit),font)
+        draw.line((390,150,480,150),fill=(15,110,86),width=2)
+        draw.text((410,120),f"r = {_solid_label(R,unit)}",fill=(55,55,55),font=font)
+
+    elif t == "cone":
+        R=_solid_num(spec.get("radius"),3)
+        H=_solid_num(spec.get("height"),8)
+        S=_solid_num(spec.get("slant_height"),None)
+        cx=390; base_y=390; rx=100; ry=30; apex_y=120
+        draw.ellipse((cx-rx,base_y-ry,cx+rx,base_y+ry),fill=(224,244,250),outline=(18,120,145),width=2)
+        draw.polygon([(cx,apex_y),(cx-rx,base_y),(cx+rx,base_y)],fill=(244,218,120),outline=(155,105,0))
+        draw.arc((cx-rx,base_y-ry,cx+rx,base_y+ry),0,180,fill=(18,120,145),width=2)
+        draw.line((cx,base_y,cx+rx,base_y),fill=(18,120,145),width=2)
+        draw.text((cx+30,base_y-28),f"r = {_solid_label(R,unit)}",fill=(55,55,55),font=font)
+        if H:
+            _draw_dimension(draw,(520,apex_y),(520,base_y),_solid_label(H,unit),font)
+        if S:
+            draw.text((470,250),f"l = {_solid_label(S,unit)}",fill=(55,55,55),font=font)
+
+    elif t in {"sphere","hemisphere"}:
+        R=_solid_num(spec.get("radius"),4)
+        cx=390; cy=285; rpx=145
+        if t=="sphere":
+            draw.ellipse((cx-rpx,cy-rpx,cx+rpx,cy+rpx),fill=(230,243,251),outline=(26,112,168),width=2)
+            draw.ellipse((cx-rpx,cy-40,cx+rpx,cy+40),outline=(110,160,195),width=1)
+        else:
+            draw.pieslice((cx-rpx,cy-rpx,cx+rpx,cy+rpx),180,360,fill=(218,246,244),outline=(25,150,150))
+            draw.ellipse((cx-rpx,cy-35,cx+rpx,cy+35),fill=(230,251,249),outline=(25,150,150),width=2)
+        draw.line((cx,cy,cx+rpx,cy),fill=(40,110,150),width=2)
+        draw.ellipse((cx-2,cy-2,cx+2,cy+2),fill=(40,110,150))
+        draw.text((cx+35,cy-25),f"r = {_solid_label(R,unit)}",fill=(55,55,55),font=font)
+
+    elif t == "triangular_prism":
+        base=_solid_num(spec.get("base"),6)
+        tri_h=_solid_num(spec.get("triangle_height"),4)
+        length=_solid_num(spec.get("length"),10)
+        # Front and rear triangular faces.
+        A=(240,390); B=(390,390); C=(315,230); dx=180; dy=-70
+        A2=(A[0]+dx,A[1]+dy); B2=(B[0]+dx,B[1]+dy); C2=(C[0]+dx,C[1]+dy)
+        for poly in [(A,B,C),(A2,B2,C2)]:
+            draw.polygon(poly,fill=(239,246,252),outline=(30,80,120))
+        for p,q in [(A,A2),(B,B2),(C,C2)]:
+            draw.line((p,q),fill=(30,80,120),width=2)
+        _draw_dimension(draw,(A[0],420),(B[0],420),_solid_label(base,unit),font)
+        _draw_dimension(draw,(210,A[1]),(210,C[1]),_solid_label(tri_h,unit),font)
+        _draw_dimension(draw,(B[0]+10,B[1]+25),(B2[0]+10,B2[1]+25),_solid_label(length,unit),font)
+
+    elif t == "composite_prism_cuboid":
+        L=_solid_num(spec.get("cuboid_length"),12)
+        D=_solid_num(spec.get("cuboid_depth"),8)
+        H=_solid_num(spec.get("cuboid_height"),5)
+        PB=_solid_num(spec.get("prism_base"),6)
+        PH=_solid_num(spec.get("prism_triangle_height"),4)
+        PL=_solid_num(spec.get("prism_length"),8)
+
+        # Cuboid base
+        cub=_draw_cuboid_iso(draw,190,330,330,125,85)
+
+        # Triangular prism mounted centrally on cuboid.
+        A=(270,300); B=(430,300); C=(350,210); dx=105; dy=-48
+        A2=(A[0]+dx,A[1]+dy); B2=(B[0]+dx,B[1]+dy); C2=(C[0]+dx,C[1]+dy)
+
+        # visible faces
+        draw.polygon([A,B,C],fill=(245,239,231),outline=(132,83,54))
+        draw.polygon([B,B2,C2,C],fill=(230,218,205),outline=(132,83,54))
+        draw.polygon([A,A2,C2,C],fill=(250,244,238),outline=(132,83,54))
+        for p,q in [(A,A2),(B,B2),(C,C2)]:
+            draw.line((p,q),fill=(132,83,54),width=2)
+
+        _draw_dimension(draw,(190,485),(520,485),_solid_label(L,unit),font)
+        _draw_dimension(draw,(175,330),(175,455),_solid_label(H,unit),font)
+        _draw_dimension(draw,(535,470),(620,420),_solid_label(D,unit),font)
+
+        _draw_dimension(draw,(A[0],315),(B[0],315),_solid_label(PB,unit),font)
+        _draw_dimension(draw,(250,A[1]),(250,C[1]),_solid_label(PH,unit),font)
+        _draw_dimension(draw,(B[0]+5,B[1]-5),(B2[0]+5,B2[1]-5),_solid_label(PL,unit),font)
+
+    elif t == "composite_cylinder_prism":
+        R=_solid_num(spec.get("cylinder_radius"),3)
+        CH=_solid_num(spec.get("cylinder_height"),8)
+        PB=_solid_num(spec.get("prism_base"),6)
+        PH=_solid_num(spec.get("prism_triangle_height"),4)
+        PL=_solid_num(spec.get("prism_length"),10)
+
+        # Triangular prism base.
+        A=(220,390); B=(430,390); C=(325,255); dx=150; dy=-65
+        A2=(A[0]+dx,A[1]+dy); B2=(B[0]+dx,B[1]+dy); C2=(C[0]+dx,C[1]+dy)
+
+        draw.polygon([A,B,C],fill=(245,239,231),outline=(132,83,54))
+        draw.polygon([B,B2,C2,C],fill=(230,218,205),outline=(132,83,54))
+        draw.polygon([A,A2,C2,C],fill=(250,244,238),outline=(132,83,54))
+        for p,q in [(A,A2),(B,B2),(C,C2)]:
+            draw.line((p,q),fill=(132,83,54),width=2)
+
+        # Cylinder mounted on top rectangular face of prism.
+        cyl=_draw_cylinder(draw,405,145,62,150)
+
+        _draw_dimension(draw,(A[0],425),(B[0],425),_solid_label(PB,unit),font)
+        _draw_dimension(draw,(195,A[1]),(195,C[1]),_solid_label(PH,unit),font)
+        _draw_dimension(draw,(B[0]+8,B[1]+20),(B2[0]+8,B2[1]+20),_solid_label(PL,unit),font)
+        _draw_dimension(draw,(485,145),(485,295),_solid_label(CH,unit),font)
+        draw.line((405,145,467,145),fill=(15,110,86),width=2)
+        draw.line((440,145,620,105),fill=(125,125,125),width=1)
+        draw.text((625,98),f"r = {_solid_label(R,unit)}",fill=(55,55,55),font=font)
+
+    elif t == "composite_cylinder_cuboid_prism":
+        L=_solid_num(spec.get("cuboid_length"),14)
+        D=_solid_num(spec.get("cuboid_depth"),9)
+        H=_solid_num(spec.get("cuboid_height"),5)
+        R=_solid_num(spec.get("cylinder_radius"),2.5)
+        CH=_solid_num(spec.get("cylinder_height"),7)
+        PB=_solid_num(spec.get("prism_base"),5)
+        PH=_solid_num(spec.get("prism_triangle_height"),4)
+        PL=_solid_num(spec.get("prism_length"),7)
+
+        # Cuboid foundation.
+        cub=_draw_cuboid_iso(draw,165,345,360,120,90)
+
+        # Triangular prism mounted on the left half.
+        A=(215,325); B=(365,325); C=(290,245); dx=90; dy=-42
+        A2=(A[0]+dx,A[1]+dy); B2=(B[0]+dx,B[1]+dy); C2=(C[0]+dx,C[1]+dy)
+        draw.polygon([A,B,C],fill=(245,239,231),outline=(132,83,54))
+        draw.polygon([B,B2,C2,C],fill=(230,218,205),outline=(132,83,54))
+        draw.polygon([A,A2,C2,C],fill=(250,244,238),outline=(132,83,54))
+        for p,q in [(A,A2),(B,B2),(C,C2)]:
+            draw.line((p,q),fill=(132,83,54),width=2)
+
+        # Cylinder mounted on the right half.
+        cyl=_draw_cylinder(draw,470,155,55,165)
+
+        # Cuboid dimensions
+        _draw_dimension(draw,(165,492),(525,492),_solid_label(L,unit),font)
+        _draw_dimension(draw,(150,345),(150,465),_solid_label(H,unit),font)
+        _draw_dimension(draw,(540,480),(630,425),_solid_label(D,unit),font)
+
+        # Prism dimensions
+        _draw_dimension(draw,(A[0],338),(B[0],338),_solid_label(PB,unit),font)
+        _draw_dimension(draw,(195,A[1]),(195,C[1]),_solid_label(PH,unit),font)
+        _draw_dimension(draw,(B[0]+3,B[1]-3),(B2[0]+3,B2[1]-3),_solid_label(PL,unit),font)
+
+        # Cylinder dimensions
+        _draw_dimension(draw,(540,155),(540,320),_solid_label(CH,unit),font)
+        draw.line((470,155,525,155),fill=(15,110,86),width=2)
+        draw.line((500,155,650,115),fill=(125,125,125),width=1)
+        draw.text((655,108),f"r = {_solid_label(R,unit)}",fill=(55,55,55),font=font)
+
+    elif t == "composite_cone_cylinder":
+        R=_solid_num(spec.get("radius"),3)
+        CH=_solid_num(spec.get("cylinder_height"),7)
+        COH=_solid_num(spec.get("cone_height"),5)
+        # cylinder
+        c=_draw_cylinder(draw,390,230,85,210)
+        # cone on top
+        apex=(390,90); left=(305,230); right=(475,230)
+        draw.polygon([apex,left,right],fill=(244,218,120),outline=(155,105,0))
+        draw.ellipse((305,202,475,258),fill=(225,248,240),outline=(15,110,86),width=2)
+        _draw_dimension(draw,(500,230),(500,440),_solid_label(CH,unit),font)
+        _draw_dimension(draw,(535,90),(535,230),_solid_label(COH,unit),font)
+        draw.line((390,230,475,230),fill=(15,110,86),width=2)
+        draw.text((410,200),f"r = {_solid_label(R,unit)}",fill=(55,55,55),font=font)
+
+    else:
+        raise ValueError(f"Unsupported solid type: {t}")
+
+    buf=BytesIO()
+    img.save(buf,format="PNG")
+    return buf.getvalue()
+
+
+def show_dimensioned_solid(spec: dict, *, caption="") -> None:
+    try:
+        st.image(
+            render_dimensioned_solid_png(spec),
+            caption=caption or None,
+            use_container_width=True,
+        )
+    except Exception as exc:
+        st.warning("The dimensioned solid diagram could not be rendered: " + str(exc))
+
+
+def add_dimensioned_solid_to_word(doc: Document, spec: dict, *, caption="") -> None:
+    try:
+        png=render_dimensioned_solid_png(spec,width=1100,height=720)
+        p=doc.add_paragraph()
+        p.alignment=WD_ALIGN_PARAGRAPH.CENTER
+        p.add_run().add_picture(BytesIO(png),width=Cm(14.2))
+        if caption:
+            cp=doc.add_paragraph(caption)
+            cp.alignment=WD_ALIGN_PARAGRAPH.CENTER
+            for rr in cp.runs:
+                rr.italic=True
+                rr.font.name="Times New Roman"
+                rr.font.size=Pt(11)
+    except Exception:
+        pass
+
+
+def _strip_solid3d_block(text: str) -> str:
+    return _SOLID3D_TAG_RE.sub("", str(text or "")).strip()
+
+
 def show_scene3d(scene, *, caption: str="") -> None:
     if scene is None: return
     try:
@@ -7555,7 +8050,7 @@ def build_setter_question_paper_docx(draft: ExamPaperDraft) -> bytes:
         p = doc.add_paragraph()
         p.paragraph_format.space_before = Pt(8)
         r = p.add_run(f"{q.question_number}. "); r.bold = True
-        append_word_mixed_math(p, _strip_generated_table_block(q.stem_text))
+        append_word_mixed_math(p, _strip_solid3d_block(_strip_generated_table_block(q.stem_text)))
         word_table_rendered = _add_question_table_to_word(doc, q)
         if not word_table_rendered and _looks_like_missing_frequency_table(q):
             warning = doc.add_paragraph()
@@ -7580,8 +8075,17 @@ def build_setter_question_paper_docx(draft: ExamPaperDraft) -> bytes:
                 caption=f"Figure {figure_number}",
             )
 
-        stats_spec = _stats_graph_spec(q)
-        if stats_spec is not None:
+        solid_spec = _dimensioned_solid_spec(q)
+        if solid_spec is not None:
+            figure_number += 1
+            add_dimensioned_solid_to_word(
+                doc,
+                solid_spec,
+                caption=f"Figure {figure_number}",
+            )
+        else:
+            stats_spec = _stats_graph_spec(q)
+        if solid_spec is None and stats_spec is not None:
             figure_number += 1
             stats_issues = validate_statistics_graph_spec(stats_spec)
             if not stats_issues:
@@ -7598,7 +8102,7 @@ def build_setter_question_paper_docx(draft: ExamPaperDraft) -> bytes:
                 rr.italic=True
                 rr.font.name="Times New Roman"
                 rr.font.size=Pt(11)
-        else:
+        elif solid_spec is None:
             graph_ready_issues = validate_function_graph_readiness(q)
             graph_spec = _question_graph_spec(q)
             if graph_ready_issues:
@@ -7762,6 +8266,49 @@ def build_setter_marking_scheme_docx(draft: ExamPaperDraft) -> bytes:
     buf = BytesIO(); doc.save(buf); return buf.getvalue()
 
 
+def audit_generated_solids(draft) -> list[str]:
+    issues = []
+    for q in list(getattr(draft, "questions", []) or []):
+        text = " ".join([
+            str(getattr(q, "stem_text", "") or ""),
+            str(getattr(q, "diagram_spec", "") or ""),
+        ]).lower()
+        if re.search(r"\b(cuboid|cube|cylinder|cone|sphere|hemisphere|triangular prism|prism|composite solid)\b", text):
+            if re.search(r"\b(volume|surface area|solid|mounted|formed by|prism)\b", text):
+                spec = _dimensioned_solid_spec(q)
+                if spec is None:
+                    issues.append(
+                        f"Question {getattr(q, 'question_number', '?')}: "
+                        "3D solid question has no reliable dimensioned diagram specification."
+                    )
+                    continue
+
+                t = str(spec.get("type", "")).lower()
+
+                if t in {"composite_cylinder_cuboid", "composite_cylinder_cuboid_prism"}:
+                    r = _solid_num(spec.get("cylinder_radius"))
+                    L = _solid_num(spec.get("cuboid_length"))
+                    D = _solid_num(spec.get("cuboid_depth"))
+                    if r and L and D and 2*r > min(L, D):
+                        issues.append(
+                            f"Question {getattr(q, 'question_number', '?')}: "
+                            "cylinder diameter is larger than the supporting cuboid face."
+                        )
+
+                if t in {"composite_prism_cuboid", "composite_cylinder_cuboid_prism"}:
+                    pb = _solid_num(spec.get("prism_base"))
+                    pl = _solid_num(spec.get("prism_length"))
+                    L = _solid_num(spec.get("cuboid_length"))
+                    D = _solid_num(spec.get("cuboid_depth"))
+                    if pb and pl and L and D and (pb > L or pl > max(L, D)):
+                        issues.append(
+                            f"Question {getattr(q, 'question_number', '?')}: "
+                            "triangular prism footprint is larger than the supporting cuboid face."
+                        )
+    return issues
+
+
+
 def audit_generated_tables(draft) -> list[str]:
     issues = []
     for q in list(getattr(draft, "questions", []) or []):
@@ -7841,7 +8388,7 @@ def render_setter_preview(draft: ExamPaperDraft) -> None:
             # MathIO-aware mixed renderer rather than st.write().
             if str(q.stem_text or "").strip():
                 preview_stem = _normalise_unit_braces(
-                    _strip_generated_table_block(str(q.stem_text or ""))
+                    _strip_solid3d_block(_strip_generated_table_block(str(q.stem_text or "")))
                 )
                 preview_stem = re.sub(r"(?<!\\)\bpi\b", r"\\pi", preview_stem, flags=re.IGNORECASE)
                 preview_stem = re.sub(r"(?<!\\)\btheta\b", r"\\theta", preview_stem, flags=re.IGNORECASE)
@@ -7874,8 +8421,16 @@ def render_setter_preview(draft: ExamPaperDraft) -> None:
                 if eq_text:
                     render_mathio(eq_text)
 
-            stats_spec = _stats_graph_spec(q)
-            if stats_spec is not None:
+            solid_spec = _dimensioned_solid_spec(q)
+            if solid_spec is not None:
+                figure_number += 1
+                show_dimensioned_solid(
+                    solid_spec,
+                    caption=f"Figure {figure_number}",
+                )
+            else:
+                stats_spec = _stats_graph_spec(q)
+            if solid_spec is None and stats_spec is not None:
                 figure_number += 1
                 stats_issues = validate_statistics_graph_spec(stats_spec)
                 if stats_issues:
@@ -7887,7 +8442,7 @@ def render_setter_preview(draft: ExamPaperDraft) -> None:
                         caption=f"Figure {figure_number}",
                         completed=completed,
                     )
-            else:
+            elif solid_spec is None:
                 graph_ready_issues = validate_function_graph_readiness(q)
                 graph_spec = _question_graph_spec(q)
                 if graph_ready_issues:
@@ -7934,7 +8489,7 @@ def render_setter_preview(draft: ExamPaperDraft) -> None:
                         )
                 elif q.diagram_spec:
                     with st.expander("Diagram / figure information", expanded=False):
-                        render_mathio_mixed(q.diagram_spec)
+                        render_mathio_mixed(_strip_solid3d_block(q.diagram_spec))
 
             for part in q.parts:
                 label = part.label or "Question"
@@ -8653,6 +9208,7 @@ if role_mode == "For Teacher":
                                 source_syllabus_notes,
                                 setter_syllabus_notes.strip(),
                                 _TABLE_GENERATION_REQUIREMENTS,
+                                _SOLID3D_GENERATION_REQUIREMENTS,
                             ]
                             if x
                         )
@@ -8686,6 +9242,13 @@ if role_mode == "For Teacher":
 
             setter_draft = st.session_state.get("setter_draft")
             if setter_draft is not None:
+                solid_audit_issues = audit_generated_solids(setter_draft)
+                if solid_audit_issues:
+                    st.warning(
+                        "Some 3D-solid questions have incomplete dimension-diagram data: "
+                        + "; ".join(solid_audit_issues)
+                    )
+
                 table_audit_issues = audit_generated_tables(setter_draft)
                 if table_audit_issues:
                     st.error(
