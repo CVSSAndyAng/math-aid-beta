@@ -2060,6 +2060,7 @@ def generate_exam_paper_draft(
     duration_minutes: int,
     topics: list[str],
     syllabus_notes: str,
+    question_focus: str = "",
     reference_text: str = "",
     reference_assets: list[UploadedAsset] | None = None,
     school_name: str = "",
@@ -2267,7 +2268,14 @@ SELECTED TRACK / SYLLABUS
 
 TEACHER SCOPE
 Topics/chapters: {topic_text}
-Additional syllabus notes: {syllabus_notes.strip() or '[None]'}
+Syllabus detail from the selected learning outcomes: {syllabus_notes.strip() or '[None]'}
+
+TEACHER-SPECIFIED QUESTION FOCUS
+{question_focus.strip() or '[None — choose appropriate question types from the selected syllabus scope]'}
+- Treat this as a POSITIVE design instruction for the styles, contexts, representations and skills to test.
+- Keep every requested question type within the selected syllabus topics and learning outcomes.
+- Do not interpret this field as an exclusion list unless the teacher explicitly writes "do not", "exclude" or "avoid".
+- Where possible, distribute the requested question types sensibly across the paper rather than repeating one identical format.
 
 ASSESSMENT SETTINGS
 Assessment type: {assessment_type}

@@ -9137,15 +9137,18 @@ if role_mode == "For Teacher":
                     key=f"setter_topics_{track_code(setter_track_label)}",
                     help="Topics are taken from the uploaded learning-outcomes workbook for this exam track.",
                 )
-                setter_syllabus_notes = st.text_area(
-                    "Additional syllabus notes / exclusions",
-                    key="setter_syllabus_notes",
+                setter_question_focus = st.text_area(
+                    "Question focus / types of questions to test",
+                    key="setter_question_focus",
                     height=130,
                     placeholder=(
-                        "Example: Algebraic manipulation; linear equations; Pythagoras; trigonometry. "
-                        "List exclusions too, e.g. no quadratic formula yet."
+                        "Example: Percentage profit/loss word problems; cumulative frequency median and IQR; "
+                        "composite solids using cuboid and cylinder; 2-step trigonometry problems."
                     ),
-                    help="The topic list already comes from the uploaded syllabus workbook. Use this box only for exclusions or school-specific emphasis.",
+                    help=(
+                        "Optional: specify the question styles, contexts, representations or skills you want tested. "
+                        "These instructions refine the selected syllabus topics; they do not replace the syllabus scope."
+                    ),
                 )
                 include_scheme = st.checkbox(
                     "Generate marking scheme together with the paper",
@@ -9176,7 +9179,7 @@ if role_mode == "For Teacher":
                 except GeminiTutorError as exc:
                     st.error(str(exc))
 
-            scope_ready = bool(setter_topics or setter_syllabus_notes.strip())
+            scope_ready = bool(setter_topics)
             can_generate = scope_ready
             if setter_reference is None:
                 st.caption(
@@ -9207,7 +9210,6 @@ if role_mode == "For Teacher":
                         combined_syllabus_notes = "\n\n".join(
                             x for x in [
                                 source_syllabus_notes,
-                                setter_syllabus_notes.strip(),
                                 _TABLE_GENERATION_REQUIREMENTS,
                                 _SOLID3D_GENERATION_REQUIREMENTS,
                             ]
@@ -9221,6 +9223,7 @@ if role_mode == "For Teacher":
                             duration_minutes=(0 if setter_assessment == "Worksheet" else int(setter_duration)),
                             topics=list(setter_topics),
                             syllabus_notes=combined_syllabus_notes,
+                            question_focus=setter_question_focus.strip(),
                             reference_text=reference_text,
                             reference_assets=reference_assets,
                             school_name=setter_school,
