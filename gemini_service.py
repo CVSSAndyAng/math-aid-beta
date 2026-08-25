@@ -854,6 +854,13 @@ class ExamPaperDraft(BaseModel):
     confidence: Literal["high", "medium", "low"]
 
 
+class _SetterQuestionBatch(BaseModel):
+    questions: list[SetterPaperQuestion] = Field(
+        default_factory=list,
+        description="Supplemental main questions generated to repair an incomplete paper.",
+    )
+
+
 class GeminiTutorError(RuntimeError):
     def __init__(self, message: str, category: str = "service") -> None:
         super().__init__(message)
@@ -2103,14 +2110,14 @@ MATRIX AND VECTOR NOTATION CONTRACT:
 - Matrices must be returned as mathematical equation content, never Python/list notation such as
   [[1,2],[3,4]].
 - Use standard matrix notation such as:
-  \begin{{pmatrix}}1 & 2 \\ 3 & 4\end{{pmatrix}}
+  \begin{pmatrix}1 & 2 \\ 3 & 4\end{pmatrix}
   in an equation field.
 - Matrix addition, scalar multiplication and matrix products must keep the complete operation in
   mathematical equation content.
 - Vectors must be written in mathematical vector notation, preferably column-vector form:
-  \mathbf{{u}}=\begin{{pmatrix}}4 \\ -1\end{{pmatrix}}
+  \mathbf{u}=\begin{pmatrix}4 \\ -1\end{pmatrix}
   rather than plain text such as u=(4,-1).
-- For directed line segments, use \overrightarrow{{AB}}.
+- For directed line segments, use \overrightarrow{AB}.
 - Keep prose such as "Given", "find", "calculate" in prose fields and the matrix/vector expression
   in MathIO/equation fields.
 
@@ -2571,6 +2578,146 @@ Return structured JSON only.
         return q_total, issues
 
 
+    def _renumber_questions_sequentially(draft: ExamPaperDraft) -> None:
+        """Use stable 1..N numbering after repair/appending."""
+        for index, question in enumerate(draft.questions, start=1):
+            question.question_number = str(index)
+
+
+    def _generate_missing_questions(
+        draft: ExamPaperDraft,
+        missing_count: int,
+        *,
+        attempts: int = 3,
+    ) -> list[SetterPaperQuestion]:
+        """Generate only the missing main questions instead of regenerating the paper."""
+        if missing_count <= 0:
+            return []
+
+        existing = []
+        for q in draft.questions:
+            parts = " | ".join(
+                str(getattr(part, "prompt_text", "") or "").strip()
+                for part in (q.parts or [])
+                if str(getattr(part, "prompt_text", "") or "").strip()
+            )
+            existing.append(
+                f"Q{q.question_number}: topic={q.topic}; AO={q.ao}; difficulty={q.difficulty}; "
+                f"stem={q.stem_text[:220]}; parts={parts[:320]}"
+            )
+
+        current_marks = sum(int(q.marks) for q in draft.questions)
+        marks_left = max(0, int(total_marks) - current_marks)
+        if assessment_type.strip().lower() == "worksheet":
+            marks_guidance = (
+                "This is a worksheet. Use sensible internal marks for schema validity, but printed marks are suppressed."
+            )
+        else:
+            marks_guidance = (
+                f"The existing questions currently total {current_marks} marks and the requested paper total is "
+                f"{total_marks}. Allocate approximately {marks_left} marks across the supplemental question(s). "
+                "Local reconciliation will make the final total exact."
+            )
+
+        recovery_prompt = f"""
+RECOVERY MODE — GENERATE ONLY MISSING MAIN QUESTIONS
+
+The main paper is already mostly valid, but Gemini returned too few questions.
+Generate exactly {missing_count} NEW main question(s), and nothing from the existing paper.
+
+Track: {track_label}
+Assessment type: {assessment_type}
+Selected topics: {topic_text}
+Syllabus scope: {syllabus_notes.strip() or '[None]'}
+{marks_guidance}
+
+EXISTING QUESTIONS — DO NOT DUPLICATE THEIR MATHEMATICAL TASK OR CONTEXT
+{chr(10).join(existing) if existing else '[None]'}
+
+Requirements:
+- Return exactly {missing_count} question object(s) in the questions array.
+- Use only the selected syllabus topics.
+- Make each new question fully solvable and mathematically independent.
+- Prefer topics/AOs/difficulties that improve variety relative to the existing questions.
+- Use fresh numerical values and fresh real-life contexts.
+- Every question must contain at least one part.
+- For any required table, include all table data.
+- For any required graph/diagram/3D solid, provide complete deterministic construction data.
+- Keep prose and mathematical fields separated exactly as required by SetterPaperQuestion.
+- If include_marking_scheme={include_marking_scheme}, provide concise valid solution_steps and marking_points.
+- Do not return the full paper. Return supplemental questions only.
+
+Return JSON matching the supplied schema only.
+""".strip()
+
+        last_exc: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            retry = ""
+            if attempt > 1:
+                retry = (
+                    f"\nRETRY: The previous recovery response was invalid. Return exactly {missing_count} "
+                    "complete supplemental question objects. Be concise and output JSON only."
+                )
+            try:
+                interaction = active_client.interactions.create(
+                    model=get_model(model),
+                    store=False,
+                    input=[{"type": "text", "text": recovery_prompt + retry}],
+                    response_format={
+                        "type": "text",
+                        "mime_type": "application/json",
+                        "schema": _SetterQuestionBatch.model_json_schema(),
+                    },
+                )
+                raw = str(interaction.output_text or "").strip()
+                if not raw:
+                    raise ValueError("Gemini returned an empty missing-question recovery response.")
+                batch = _SetterQuestionBatch.model_validate_json(raw)
+                questions = list(batch.questions or [])
+                if len(questions) != missing_count:
+                    raise ValueError(
+                        f"Recovery generated {len(questions)} questions instead of {missing_count}."
+                    )
+                if any(not q.parts for q in questions):
+                    raise ValueError("A supplemental question contained no parts.")
+                return questions
+            except Exception as exc:
+                last_exc = exc
+
+        if last_exc is not None:
+            raise last_exc
+        return []
+
+
+    def _repair_question_count(draft: ExamPaperDraft) -> list[str]:
+        """Repair too few/too many main questions locally and by targeted generation."""
+        notes: list[str] = []
+        actual = len(draft.questions)
+        expected = int(number_of_questions)
+
+        if actual > expected:
+            # Keep the requested paper length deterministic. Later mark reconciliation
+            # redistributes the removed marks across the retained questions.
+            removed = actual - expected
+            draft.questions = list(draft.questions[:expected])
+            notes.append(
+                f"Removed {removed} surplus generated question(s) to match the requested {expected}."
+            )
+            _renumber_questions_sequentially(draft)
+            return notes
+
+        if actual < expected:
+            missing = expected - actual
+            supplements = _generate_missing_questions(draft, missing, attempts=3)
+            draft.questions.extend(supplements)
+            _renumber_questions_sequentially(draft)
+            notes.append(
+                f"Generated and appended {missing} missing question(s) to reach the requested {expected}."
+            )
+
+        return notes
+
+
     # Mark distribution is flexible. Reconcile it locally before asking Gemini
     # to regenerate anything.
     mark_notes = reconcile_marks(result)
@@ -2600,6 +2747,21 @@ Return structured JSON only.
         mark_notes.extend(reconcile_marks(result))
         _, mark_issues = audit_marks(result)
         diagram_issues = audit_setter_diagrams(result)
+
+    # Targeted question-count recovery. A missing main question should not force
+    # the teacher to regenerate an otherwise-valid full paper.
+    question_count_notes: list[str] = []
+    if len(result.questions) != int(number_of_questions):
+        try:
+            question_count_notes.extend(_repair_question_count(result))
+            mark_notes.extend(reconcile_marks(result))
+            _, mark_issues = audit_marks(result)
+            diagram_issues = audit_setter_diagrams(result)
+        except Exception as exc:
+            question_count_notes.append(
+                "Automatic missing-question recovery was attempted but did not complete: "
+                + str(exc)[:240]
+            )
 
     # ------------------------------------------------------------
     # TOLERANT DIAGRAM POLICY
@@ -2660,6 +2822,7 @@ Return structured JSON only.
     # Keep a teacher-facing record of every automatic adjustment.
     verification_notes = list(result.verification_notes or [])
     verification_notes.extend(mark_notes[:6])
+    verification_notes.extend(question_count_notes[:4])
     verification_notes.extend(diagram_notes[:8])
     if diagram_notes:
         verification_notes.append(
