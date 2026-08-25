@@ -2110,14 +2110,14 @@ MATRIX AND VECTOR NOTATION CONTRACT:
 - Matrices must be returned as mathematical equation content, never Python/list notation such as
   [[1,2],[3,4]].
 - Use standard matrix notation such as:
-  \begin{pmatrix}1 & 2 \\ 3 & 4\end{pmatrix}
+  \begin{{pmatrix}}1 & 2 \\ 3 & 4\end{{pmatrix}}
   in an equation field.
 - Matrix addition, scalar multiplication and matrix products must keep the complete operation in
   mathematical equation content.
 - Vectors must be written in mathematical vector notation, preferably column-vector form:
-  \mathbf{u}=\begin{pmatrix}4 \\ -1\end{pmatrix}
+  \mathbf{{u}}=\begin{{pmatrix}}4 \\ -1\end{{pmatrix}}
   rather than plain text such as u=(4,-1).
-- For directed line segments, use \overrightarrow{AB}.
+- For directed line segments, use \overrightarrow{{AB}}.
 - Keep prose such as "Given", "find", "calculate" in prose fields and the matrix/vector expression
   in MathIO/equation fields.
 

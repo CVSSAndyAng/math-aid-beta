@@ -13,7 +13,6 @@ import math
 import json
 import os
 import re
-pmatrix = "pmatrix"  # MathIO matrix environment token
 
 import html
 import secrets
