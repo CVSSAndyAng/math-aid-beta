@@ -85,6 +85,10 @@ canvas{position:absolute;inset:0;width:100%;height:100%;touch-action:none;cursor
         <input id="lineLength" type="number" min="0.1" max="50" step="0.1" inputmode="decimal" placeholder="free">
         <span>units</span>
       </label>
+      <label class="length-control" id="radiusControl">Compass radius
+        <input id="compassRadius" type="number" min="0.5" max="20" step="0.1" inputmode="decimal" value="7.0">
+        <span>units</span>
+      </label>
       <button class="action" id="gridBtn">Grid</button>
       <button class="action primary" id="saveBtn">💾 Save to notes</button>
     </div>
@@ -111,6 +115,8 @@ const measureEl=document.getElementById("measure");
 const hintEl=document.getElementById("instrumentHint");
 const lengthControl=document.getElementById("lengthControl");
 const lineLengthInput=document.getElementById("lineLength");
+const radiusControl=document.getElementById("radiusControl");
+const compassRadiusInput=document.getElementById("compassRadius");
 
 let cssW=0,cssH=0,dpr=1,tool="pen",pointerDown=false;
 let sx=0,sy=0,baseImage=null,history=[],grid=false,linePreview=null;
@@ -163,6 +169,23 @@ function restore(data,after=null){
 function angleNorm(a){while(a<0)a+=Math.PI*2;while(a>=Math.PI*2)a-=Math.PI*2;return a}
 function shortestDelta(a,b){let d=angleNorm(a)-angleNorm(b);if(d>Math.PI)d-=Math.PI*2;if(d<-Math.PI)d+=Math.PI*2;return d}
 function pointFrom(cx,cy,r,a){return[cx+r*Math.cos(a),cy+r*Math.sin(a)]}
+function compassRadiusPx(){
+  const c=compass;
+  const needle=pointFrom(c.cx,c.cy,c.radius,c.needleAngle);
+  const pencil=pointFrom(c.cx,c.cy,c.radius,c.pencilAngle);
+  return dist(needle[0],needle[1],pencil[0],pencil[1])
+}
+function setCompassRadius(units){
+  if(!Number.isFinite(units)||units<=0)return;
+  const c=compass,target=Math.max(10,Math.min(400,units*20));
+  c.radius=Math.max(70,Math.min(240,Math.max(c.radius,target/1.9)));
+  const separation=2*Math.asin(Math.min(.999,target/(2*c.radius)));
+  const side=shortestDelta(c.pencilAngle,c.needleAngle)>=0?1:-1;
+  c.pencilAngle=c.needleAngle+side*separation;
+  compassRadiusInput.value=(compassRadiusPx()/20).toFixed(1);
+  measureEl.textContent="Compass radius: "+compassRadiusInput.value+" units";
+  redrawOverlay()
+}
 
 function drawGridOverlay(){
   ctx.save();ctx.strokeStyle="rgba(100,110,130,.13)";ctx.lineWidth=1;
@@ -210,7 +233,7 @@ function drawCompass(){
 
   // radius hint
   ctx.font="12px Arial";ctx.fillStyle="#333";
-  ctx.fillText("r = "+(c.radius/20).toFixed(1)+" units",c.cx+18,c.cy-20);
+  ctx.fillText("r = "+(compassRadiusPx()/20).toFixed(1)+" units",c.cx+18,c.cy-20);
 
   ctx.restore();
 }
@@ -297,12 +320,13 @@ function setTool(t){
   measureEl.textContent="";
   hintEl.style.display=(t==="compass"||t==="protractor")?"block":"none";
   lengthControl.classList.toggle("visible",t==="line"||t==="ruler");
+  radiusControl.classList.toggle("visible",t==="compass");
   if(t==="compass"){
-    statusEl.textContent="Compass — drag hinge to move; drag white handles to change opening; drag pencil tip around needle to draw an arc";
-    hintEl.textContent="Compass: hinge = move • white handles = opening • pencil tip = sweep arc"
+    statusEl.textContent="Compass — type a radius or adjust the white handle; drag hinge to move; drag pencil tip to draw an arc";
+    hintEl.textContent="Compass: set radius above • hinge = move • pencil tip = sweep arc"
   }else if(t==="protractor"){
-    statusEl.textContent="Protractor — drag centre to move; drag top handle to rotate; drag from centre to place/read a ray";
-    hintEl.textContent="Protractor: centre = move • top handle = rotate • drag from centre = measure/draw ray"
+    statusEl.textContent="Protractor — drag its body to move; drag top handle to rotate; drag from centre to place/read a ray";
+    hintEl.textContent="Protractor: body = move • top handle = rotate • centre = measure/draw ray"
   }else{
     hintEl.style.display="none";
     statusEl.textContent={
@@ -330,10 +354,10 @@ function hitCompass(x,y){
 
 function hitProtractor(x,y){
   const p=protractor;
-  if(dist(x,y,p.cx,p.cy)<18)return"move";
   const handle=pointFrom(p.cx,p.cy,p.radius+24,p.rotation-Math.PI/2);
   if(dist(x,y,handle[0],handle[1])<20)return"rotate";
-  if(dist(x,y,p.cx,p.cy)<p.radius+10)return"ray";
+  if(dist(x,y,p.cx,p.cy)<20)return"ray";
+  if(dist(x,y,p.cx,p.cy)<p.radius+10)return"move";
   return null
 }
 
@@ -407,7 +431,8 @@ function pointerMove(e){
       c.pencilAngle=Math.atan2(newPencil[1]-c.cy,newPencil[0]-c.cx);
       c.sweepLast=ang
     }
-    measureEl.textContent="Compass opening: "+(c.radius/20).toFixed(1)+" units";
+    compassRadiusInput.value=(compassRadiusPx()/20).toFixed(1);
+    measureEl.textContent="Compass radius: "+compassRadiusInput.value+" units";
     redrawOverlay();return
   }
 
@@ -467,6 +492,9 @@ document.querySelector('[data-action="undo"]').addEventListener("click",()=>{if(
 document.querySelector('[data-action="clear"]').addEventListener("click",()=>{
   remember();dctx.clearRect(0,0,cssW,cssH);linePreview=null;redrawOverlay();measureEl.textContent=""
 });
+compassRadiusInput.addEventListener("change",()=>setCompassRadius(Number.parseFloat(compassRadiusInput.value)));
+compassRadiusInput.addEventListener("keydown",e=>{if(e.key==="Enter"){e.preventDefault();setCompassRadius(Number.parseFloat(compassRadiusInput.value));canvas.focus()}});
+
 document.getElementById("gridBtn").addEventListener("click",()=>{
   grid=!grid;document.getElementById("gridBtn").textContent=grid?"Grid ✓":"Grid";redrawOverlay()
 });
