@@ -8103,6 +8103,25 @@ IMPORTANT TABLE REQUIREMENTS FOR GENERATED ASSESSMENTS:
 """
 
 
+
+def _add_survey_options_to_word(doc: Document, text: str) -> bool:
+    options = _parse_survey_options(text)
+    if not options:
+        return False
+    table = doc.add_table(rows=1, cols=1)
+    table.style = "Table Grid"
+    head = table.rows[0].cells[0]
+    head.text = "Response option"
+    if head.paragraphs and head.paragraphs[0].runs:
+        head.paragraphs[0].runs[0].bold = True
+    for option in options:
+        cell = table.add_row().cells[0]
+        cell.text = _strip_visible_latex_text_commands(option)
+    doc.add_paragraph()
+    return True
+
+
+
 def build_setter_question_paper_docx(draft: ExamPaperDraft) -> bytes:
     doc = Document()
     sec = doc.sections[0]
@@ -8151,7 +8170,7 @@ def build_setter_question_paper_docx(draft: ExamPaperDraft) -> bytes:
         p = doc.add_paragraph()
         p.paragraph_format.space_before = Pt(8)
         r = p.add_run(f"{q.question_number}. "); r.bold = True
-        append_word_mixed_math(p, _strip_solid3d_block(_strip_generated_table_block(q.stem_text)))
+        append_word_mixed_math(p, _strip_visible_latex_text_commands(_strip_solid3d_block(_strip_generated_table_block(q.stem_text))))
         word_table_rendered = _add_question_table_to_word(doc, q)
         if not word_table_rendered and _looks_like_missing_frequency_table(q):
             warning = doc.add_paragraph()
@@ -8176,7 +8195,13 @@ def build_setter_question_paper_docx(draft: ExamPaperDraft) -> bytes:
                 caption=f"Figure {figure_number}",
             )
 
-        solid_spec = _dimensioned_solid_spec(q)
+        polygon_spec = _polygon_question_spec(q)
+        if polygon_spec is not None:
+            figure_number += 1
+            add_polygon_question_to_word(doc, q, caption=f"Figure {figure_number}")
+            solid_spec = None
+        else:
+            solid_spec = _dimensioned_solid_spec(q)
         if solid_spec is not None:
             figure_number += 1
             add_dimensioned_solid_to_word(
@@ -8186,7 +8211,7 @@ def build_setter_question_paper_docx(draft: ExamPaperDraft) -> bytes:
             )
         else:
             stats_spec = _stats_graph_spec(q)
-        if solid_spec is None and stats_spec is not None:
+        if polygon_spec is None and solid_spec is None and stats_spec is not None:
             figure_number += 1
             stats_issues = validate_statistics_graph_spec(stats_spec)
             if not stats_issues:
@@ -8489,6 +8514,244 @@ def _looks_too_similar(source_text: str, generated_text: str) -> bool:
     return overlap >= 0.84
 
 
+
+_MATHIO_STRUCTURE_CONTRACT = r"""
+MATHIO / QUESTION-STRUCTURE CONTRACT
+- Never render an entire English sentence as a LaTeX/MathIO equation.
+- Prose must remain normal text. Only mathematical expressions go through MathIO.
+- Never expose raw LaTeX commands or backslashes to students/teachers.
+- Never output literal forms such as sqrt[3]{729}, \%, \text{{cm}}, {cm}, or \anglePQR in prose.
+- Use valid MathIO-ready LaTeX:
+  \sqrt[3]{729}, \frac{3}{8}, 40\%, \angle PQR, 90^\circ.
+- Units in prose are plain text: 6 cm, 15 cm, 24 discs.
+- Units inside a mathematical expression use \mathrm{cm}, \mathrm{cm}^2, \mathrm{cm}^3.
+- Do not duplicate the question instruction in both stem_text and a part prompt.
+- Do not add a separate 'Given:' equation line when the givens are already stated clearly in prose.
+- If information is naturally tabular (survey response options, grouped data, value-frequency data,
+  comparison data), use a structured table instead of a long italic equation-like line.
+- Survey/category options must be displayed as a table/list of response choices, never as one MathIO formula.
+- Construction questions must keep instructions as prose and use MathIO only for labels/lengths/angles.
+- Fractions, roots, powers, matrices and vectors must use proper mathematical notation rather than plain
+  programming syntax.
+""".strip()
+
+
+def _strip_visible_latex_text_commands(text: str) -> str:
+    """Prevent common raw-LaTeX artifacts from leaking into normal prose."""
+    value = str(text or "")
+    # Units accidentally emitted as {cm} or \text{cm}/\text{{cm}}.
+    value = re.sub(r'\\text\s*\{\{?\s*(mm|cm|m|km|g|kg|s|min|h)\s*\}?\}', r'\1', value)
+    value = re.sub(r'\{\s*(mm|cm|m|km|g|kg|s|min|h)\s*\}', r'\1', value)
+    # Percent in prose.
+    value = value.replace(r'\%', '%')
+    # Common angle command accidentally glued to the label.
+    value = re.sub(r'\\angle\s*([A-Z]{3})', r'∠\1', value)
+    # Remove text{} wrapper while preserving its contents for prose.
+    value = re.sub(r'\\text\s*\{\{?([^{}]+)\}?\}', r'\1', value)
+    return value
+
+
+def _looks_like_survey_options(text: str) -> bool:
+    low = str(text or "").lower()
+    return (
+        "options:" in low
+        or "response options" in low
+        or "survey question options" in low
+    )
+
+
+def _parse_survey_options(text: str) -> list[str]:
+    source = str(text or "")
+    m = re.search(r'(?is)\boptions?\s*:\s*(.+)$', source)
+    if not m:
+        return []
+    raw = m.group(1).strip()
+    # Split on commas/semicolons but keep interval wording.
+    items = [re.sub(r'\s+', ' ', x).strip(" .") for x in re.split(r'\s*[,;]\s*', raw)]
+    return [x for x in items if x]
+
+
+def _render_survey_options_table(text: str) -> bool:
+    options = _parse_survey_options(text)
+    if not options:
+        return False
+    st.dataframe(
+        pd.DataFrame({"Response option": options}),
+        hide_index=True,
+        use_container_width=False,
+    )
+    return True
+
+
+
+def _polygon_question_spec(question) -> dict | None:
+    """Return a simple polygon visual spec for polygon-angle questions."""
+    text = " ".join([
+        str(getattr(question, "stem_text", "") or ""),
+        " ".join(str(getattr(p, "prompt_text", "") or "") for p in (getattr(question, "parts", []) or [])),
+    ])
+    low = text.lower()
+
+    if not re.search(r"\b(interior angle|exterior angle|polygon|regular polygon|octagon|hexagon|pentagon|nonagon|decagon)\b", low):
+        return None
+
+    names = {
+        "triangle": 3,
+        "quadrilateral": 4,
+        "pentagon": 5,
+        "hexagon": 6,
+        "heptagon": 7,
+        "octagon": 8,
+        "nonagon": 9,
+        "decagon": 10,
+        "dodecagon": 12,
+    }
+
+    n = None
+    for name, sides in names.items():
+        if name in low:
+            n = sides
+            break
+
+    if n is None:
+        m = re.search(r"\b(?:regular\s+)?(\d+)[-\s]?sided\s+polygon\b", low)
+        if m:
+            n = int(m.group(1))
+
+    if n is None:
+        m = re.search(r"\bn\s*=\s*(\d+)\b", text)
+        if m:
+            n = int(m.group(1))
+
+    if n is None or n < 3 or n > 20:
+        return None
+
+    return {"sides": n, "regular": "regular" in low}
+
+
+def render_polygon_question_png(spec: dict, *, width=820, height=500) -> bytes:
+    """Render a clean exam-style regular polygon diagram."""
+    img = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(img)
+    font = ImageFont.load_default()
+
+    n = int(spec.get("sides", 6))
+    cx, cy = width // 2, height // 2
+    radius = min(width, height) * 0.33
+
+    # Put a vertex near the top, textbook style.
+    start_angle = -math.pi / 2
+    pts = []
+    for i in range(n):
+        a = start_angle + 2 * math.pi * i / n
+        pts.append((cx + radius * math.cos(a), cy + radius * math.sin(a)))
+
+    draw.polygon(
+        pts,
+        fill=(240, 246, 252),
+        outline=(55, 85, 125),
+    )
+    # redraw thicker edges
+    draw.line(pts + [pts[0]], fill=(55, 85, 125), width=3)
+
+    # Add vertex labels only for manageable polygons.
+    labels = "ABCDEFGHIJKLMNOPQRST"
+    if n <= len(labels):
+        for i, (x, y) in enumerate(pts):
+            vx, vy = x - cx, y - cy
+            mag = max(1, (vx * vx + vy * vy) ** 0.5)
+            ox, oy = 20 * vx / mag, 20 * vy / mag
+            draw.text((x + ox - 3, y + oy - 5), labels[i], fill=(40, 40, 40), font=font)
+
+    draw.text(
+        (20, 20),
+        f"{n}-sided {'regular ' if spec.get('regular') else ''}polygon",
+        fill=(55, 55, 55),
+        font=font,
+    )
+
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def show_polygon_question_diagram(question, *, caption="") -> bool:
+    spec = _polygon_question_spec(question)
+    if spec is None:
+        return False
+    st.image(
+        render_polygon_question_png(spec),
+        caption=caption or None,
+        use_container_width=True,
+    )
+    return True
+
+
+def add_polygon_question_to_word(doc: Document, question, *, caption="") -> bool:
+    spec = _polygon_question_spec(question)
+    if spec is None:
+        return False
+    png = render_polygon_question_png(spec, width=1000, height=620)
+    p = doc.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p.add_run().add_picture(BytesIO(png), width=Cm(12.5))
+    if caption:
+        cp = doc.add_paragraph(caption)
+        cp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        for rr in cp.runs:
+            rr.italic = True
+            rr.font.name = "Times New Roman"
+            rr.font.size = Pt(11)
+    return True
+
+
+def _diagram_topic_mismatch(question) -> str | None:
+    """Detect common cases where a generated diagram does not belong to the question."""
+    text = " ".join([
+        str(getattr(question, "stem_text", "") or ""),
+        str(getattr(question, "diagram_spec", "") or ""),
+        " ".join(str(getattr(p, "prompt_text", "") or "") for p in (getattr(question, "parts", []) or [])),
+    ]).lower()
+
+    # Polygon-angle questions should never get an unrelated Cartesian graph.
+    polygon_topic = bool(
+        re.search(r"\b(interior angle|exterior angle|regular polygon|polygon|octagon|hexagon|pentagon|nonagon|decagon)\b", text)
+    )
+    if polygon_topic:
+        if getattr(question, "diagram_graph", None) is not None:
+            return "Polygon-angle question was assigned an unrelated coordinate graph."
+        graph_spec = str(getattr(question, "graph_spec", "") or "").lower()
+        if graph_spec and re.search(r"\b(x[- ]?axis|y[- ]?axis|coordinate|function|plot|gradient|line graph)\b", graph_spec):
+            return "Polygon-angle question was assigned an unrelated graph specification."
+
+    # Mensuration/solid questions should not get Cartesian graphs.
+    solid_topic = bool(
+        re.search(r"\b(cuboid|cube|cylinder|cone|sphere|hemisphere|prism|volume|surface area)\b", text)
+    )
+    if solid_topic and getattr(question, "diagram_graph", None) is not None:
+        return "3D/mensuration question was assigned an unrelated coordinate graph."
+
+    # Statistics graph questions should not get geometry diagrams.
+    stats_topic = bool(
+        re.search(r"\b(cumulative frequency|histogram|box plot|scatter plot|frequency polygon)\b", text)
+    )
+    if stats_topic and getattr(question, "diagram_scene_3d", None) is not None:
+        return "Statistics question was assigned an unrelated 3D geometry diagram."
+
+    return None
+
+
+def audit_diagram_relevance(draft) -> list[str]:
+    issues = []
+    for q in list(getattr(draft, "questions", []) or []):
+        mismatch = _diagram_topic_mismatch(q)
+        if mismatch:
+            issues.append(
+                f"Question {getattr(q, 'question_number', '?')}: {mismatch}"
+            )
+    return issues
+
+
 def render_setter_preview(draft: ExamPaperDraft) -> None:
     """Render the generated assessment paper with MathIO for all mathematics."""
     st.markdown("### Generated paper preview")
@@ -8543,15 +8806,30 @@ def render_setter_preview(draft: ExamPaperDraft) -> None:
             # Stem prose can itself contain mathematical expressions, so use the
             # MathIO-aware mixed renderer rather than st.write().
             if str(q.stem_text or "").strip():
-                preview_stem = _normalise_unit_braces(
-                    _strip_solid3d_block(_strip_generated_table_block(str(q.stem_text or "")))
+                preview_stem = _strip_visible_latex_text_commands(
+                    _normalise_unit_braces(
+                        _strip_solid3d_block(_strip_generated_table_block(str(q.stem_text or "")))
+                    )
                 )
                 preview_stem = re.sub(r"(?<!\\)\bpi\b", r"\\pi", preview_stem, flags=re.IGNORECASE)
                 preview_stem = re.sub(r"(?<!\\)\btheta\b", r"\\theta", preview_stem, flags=re.IGNORECASE)
+                survey_table_rendered = False
                 if preview_stem.strip():
-                    render_mathio_mixed(preview_stem)
+                    if _looks_like_survey_options(preview_stem):
+                        prose_without_options = re.sub(
+                            r'(?is)\boptions?\s*:\s*.+$',
+                            '',
+                            preview_stem,
+                        ).strip()
+                        if prose_without_options:
+                            render_mathio_mixed(prose_without_options)
+                        survey_table_rendered = _render_survey_options_table(preview_stem)
+                    else:
+                        render_mathio_mixed(preview_stem)
 
             table_rendered = _render_question_table_preview(q)
+            if survey_table_rendered:
+                table_rendered = True
             if not table_rendered and _looks_like_missing_frequency_table(q):
                 st.error(
                     "This generated question refers to a frequency table but the frequency "
@@ -8574,10 +8852,21 @@ def render_setter_preview(draft: ExamPaperDraft) -> None:
                     and re.search(r"(?:<|\\le|≤).*(?:<|\\le|≤)", eq_text)
                 ):
                     continue
+                # Avoid redundant "given" equations already stated in prose.
+                prose_check = str(getattr(q, "stem_text", "") or "").lower()
+                normalized_eq_words = re.sub(r'[^a-z0-9]+', ' ', eq_text.lower()).strip()
+                if normalized_eq_words and normalized_eq_words in re.sub(r'[^a-z0-9]+', ' ', prose_check):
+                    continue
                 if eq_text:
                     render_mathio(eq_text)
 
-            solid_spec = _dimensioned_solid_spec(q)
+            polygon_spec = _polygon_question_spec(q)
+            if polygon_spec is not None:
+                figure_number += 1
+                show_polygon_question_diagram(q, caption=f"Figure {figure_number}")
+                solid_spec = None
+            else:
+                solid_spec = _dimensioned_solid_spec(q)
             if solid_spec is not None:
                 figure_number += 1
                 show_dimensioned_solid(
@@ -9371,6 +9660,7 @@ if role_mode == "For Teacher":
                                 _TABLE_GENERATION_REQUIREMENTS,
                                 _SOLID3D_GENERATION_REQUIREMENTS,
                                 _regenerative_instruction_block(),
+                                _MATHIO_STRUCTURE_CONTRACT,
                             ]
                             if x
                         )
@@ -9405,6 +9695,13 @@ if role_mode == "For Teacher":
 
             setter_draft = st.session_state.get("setter_draft")
             if setter_draft is not None:
+                diagram_relevance_issues = audit_diagram_relevance(setter_draft)
+                if diagram_relevance_issues:
+                    st.error(
+                        "Generated paper contains question/diagram mismatches and should be regenerated: "
+                        + "; ".join(diagram_relevance_issues)
+                    )
+
                 solid_audit_issues = audit_generated_solids(setter_draft)
                 if solid_audit_issues:
                     st.warning(

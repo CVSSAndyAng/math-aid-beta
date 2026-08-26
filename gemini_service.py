@@ -2118,6 +2118,17 @@ GRAPH-READING FAIL-SAFE:
 
 
 
+STRICT MATHIO STRUCTURE CONTRACT:
+- English instructions and sentences are prose, never one large LaTeX expression.
+- Only mathematical fragments are LaTeX/MathIO.
+- Never expose raw backslashes or commands such as \text, \mathrm, \%, \anglePQR in prose.
+- Do not repeat the same instruction in stem_text and a part prompt.
+- Do not repeat givens as a separate equation list if the prose already states them.
+- Survey/category options and grouped data must use a table representation, not a single equation line.
+- Construction instructions remain prose; lengths and angles use proper mathematical notation.
+- Roots must use proper notation, e.g. \sqrt[3]{{729}}, not visible text "sqrt[3]{{729}}".
+- Units in prose are plain (cm, kg); units in equation fields use \mathrm{{cm}} etc.
+
 MATRIX AND VECTOR NOTATION CONTRACT:
 - Matrices must be returned as mathematical equation content, never Python/list notation such as
   [[1,2],[3,4]].
@@ -2160,6 +2171,25 @@ GRAPH-CONSTRUCTION CONTRACT:
 - Use symbolic constants in printed mathematics: use \\pi, not the word "pi"; use \\theta, not "theta".
 
 
+
+STRICT QUESTION STRUCTURE CONTRACT:
+- Prose stays as normal prose; only mathematical expressions use MathIO/LaTeX.
+- Never show raw backslashes, \text commands or programming-like root syntax to the user.
+- Do not repeat the same instruction in the stem and again as a sub-question.
+- Do not repeat givens as a separate MathIO line when they are already clear in prose.
+- Use tables for naturally tabular data such as survey response options and frequency data.
+- Construction instructions stay in prose with only lengths/angles rendered mathematically.
+
+DIAGRAM RELEVANCE CONTRACT:
+- Every diagram must be directly required by or clearly support the question.
+- Never attach a generic graph, stock image or unrelated geometry diagram merely because the topic is visual.
+- Before returning a diagram, verify that every visible object belongs to the actual question.
+- Polygon interior/exterior-angle questions must use a polygon diagram or no diagram. Never use a Cartesian line graph.
+- Coordinate/graph questions may use Cartesian axes.
+- Statistics graph questions must use the correct statistical graph type.
+- Mensuration/3D-solid questions must use the relevant solid/composite-solid diagram.
+- Similar-shape questions must show the actual pair of similar shapes described.
+- If no diagram adds mathematical value, return no diagram rather than an unrelated one.
 
 3D-DIAGRAM CONTRACT:
 - Prefer the deterministic SOLID3D transport supplied in the teacher syllabus notes for standard
@@ -3230,6 +3260,10 @@ REGENERATIVE CONTRACT
 - Do not reveal the answer.
 - Use MathIO-compatible inline LaTeX where mathematics appears.
 - Return ONLY the regenerated student question, no commentary.
+- Keep prose as normal prose and maths as MathIO-compatible LaTeX fragments.
+- Do not expose raw LaTeX commands/backslashes in visible prose.
+- Use tables for survey options, grouped-frequency data and other naturally tabular information.
+- Do not duplicate the same instruction or givens in prose and equation form.
 
 VARIATION LEVEL: {variation_level}
 - Similar: same mathematical structure, fresh surface values/variables/dimensions.
