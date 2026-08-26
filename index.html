@@ -1,0 +1,358 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Math Buddy Geometry Board</title>
+<style>
+:root{
+  --purple:#7357d8; --purple2:#e5dcff; --ink:#222; --paper:#fffdf0;
+  --border:#cfd5e2; --muted:#667085;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;background:transparent;font-family:Arial,Helvetica,sans-serif;color:#222}
+.shell{
+  width:100%;
+  height:700px;
+  display:grid;
+  grid-template-columns:132px 1fr;
+  border:1px solid var(--border);
+  border-radius:14px;
+  overflow:hidden;
+  background:#fff;
+}
+.toolbar{
+  background:#f4efff;
+  border-right:1px solid #d9cefa;
+  padding:10px;
+  display:flex;
+  flex-direction:column;
+  gap:7px;
+  overflow:auto;
+}
+.tool{
+  appearance:none;
+  border:1px solid #beaef0;
+  background:#e3d8ff;
+  border-radius:10px;
+  min-height:52px;
+  padding:6px 7px;
+  cursor:pointer;
+  display:flex;
+  align-items:center;
+  gap:8px;
+  font-size:13px;
+  font-weight:600;
+  color:#2f2850;
+  touch-action:manipulation;
+}
+.tool .ico{
+  width:28px;height:28px;
+  display:flex;align-items:center;justify-content:center;
+  font-size:20px;
+  background:#fff;
+  border-radius:7px;
+  border:1px solid #d6cef0;
+  flex:0 0 auto;
+}
+.tool.active{
+  background:#cbb8ff;
+  border-color:#6b56d6;
+  box-shadow:inset 0 0 0 2px #6b56d6;
+}
+.tool.secondary{background:#f8f6ff}
+.board-wrap{
+  position:relative;
+  background:var(--paper);
+  min-width:0;
+  overflow:hidden;
+}
+canvas{
+  position:absolute; inset:0;
+  width:100%; height:100%;
+  touch-action:none;
+  cursor:crosshair;
+}
+.top-actions{
+  position:absolute;right:12px;top:12px;z-index:5;
+  display:flex;gap:8px;
+}
+.action{
+  border:1px solid #cbd2df;
+  background:white;
+  border-radius:9px;
+  padding:9px 12px;
+  font-size:13px;
+  cursor:pointer;
+  box-shadow:0 1px 2px rgba(0,0,0,.04);
+}
+.action.primary{background:#5f61df;color:white;border-color:#5f61df}
+.status{
+  position:absolute;left:12px;bottom:10px;z-index:5;
+  background:rgba(255,255,255,.94);
+  border:1px solid #e0e3eb;
+  border-radius:8px;
+  padding:6px 9px;
+  font-size:12px;color:#555;
+  pointer-events:none;
+}
+.measure{
+  position:absolute;right:12px;bottom:10px;z-index:5;
+  background:rgba(255,255,255,.94);
+  border:1px solid #e0e3eb;border-radius:8px;
+  padding:6px 9px;font-size:12px;color:#555;
+  pointer-events:none;
+}
+@media(max-width:800px){
+  .shell{grid-template-columns:104px 1fr;height:620px}
+  .tool{font-size:11px;gap:5px;padding:5px}
+  .tool .ico{width:25px;height:25px;font-size:18px}
+}
+</style>
+</head>
+<body>
+<div class="shell">
+  <div class="toolbar" id="toolbar">
+    <button class="tool active" data-tool="pen"><span class="ico">✏️</span><span>Pencil</span></button>
+    <button class="tool" data-tool="line"><span class="ico">╱</span><span>Line</span></button>
+    <button class="tool" data-tool="compass"><span class="ico">◯</span><span>Compass</span></button>
+    <button class="tool" data-tool="protractor"><span class="ico">∠</span><span>Protractor</span></button>
+    <button class="tool" data-tool="ruler"><span class="ico">📏</span><span>Ruler</span></button>
+    <button class="tool" data-tool="eraser"><span class="ico">⌫</span><span>Eraser</span></button>
+    <button class="tool secondary" data-action="undo"><span class="ico">↶</span><span>Undo</span></button>
+    <button class="tool secondary" data-action="clear"><span class="ico">CLR</span><span>Clear</span></button>
+  </div>
+  <div class="board-wrap" id="boardWrap">
+    <canvas id="canvas"></canvas>
+    <div class="top-actions">
+      <button class="action" id="gridBtn">Grid</button>
+      <button class="action primary" id="saveBtn">💾 Save to notes</button>
+    </div>
+    <div class="status" id="status">Pencil — Apple Pencil, touch or mouse</div>
+    <div class="measure" id="measure"></div>
+  </div>
+</div>
+
+<script>
+const Streamlit = {
+  setComponentReady(){
+    window.parent.postMessage({isStreamlitMessage:true,type:"streamlit:componentReady",apiVersion:1},"*");
+  },
+  setFrameHeight(height){
+    window.parent.postMessage({isStreamlitMessage:true,type:"streamlit:setFrameHeight",height:height},"*");
+  },
+  setComponentValue(value){
+    window.parent.postMessage({isStreamlitMessage:true,type:"streamlit:setComponentValue",value:value},"*");
+  }
+};
+
+const canvas = document.getElementById("canvas");
+const wrap = document.getElementById("boardWrap");
+const ctx = canvas.getContext("2d");
+const statusEl = document.getElementById("status");
+const measureEl = document.getElementById("measure");
+
+let cssW=0, cssH=0, dpr=1;
+let tool="pen", pointerDown=false;
+let sx=0, sy=0, lastX=0, lastY=0;
+let baseImage=null;
+let history=[];
+let grid=false;
+
+function resizeCanvas(preserve=true){
+  let old = preserve ? canvas.toDataURL("image/png") : null;
+  const r = wrap.getBoundingClientRect();
+  cssW = Math.max(300, Math.floor(r.width));
+  cssH = Math.max(400, Math.floor(r.height));
+  dpr = Math.max(1, window.devicePixelRatio || 1);
+  canvas.width = Math.floor(cssW*dpr);
+  canvas.height = Math.floor(cssH*dpr);
+  canvas.style.width = cssW+"px";
+  canvas.style.height = cssH+"px";
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.lineCap="round";
+  ctx.lineJoin="round";
+  ctx.lineWidth=2;
+  ctx.strokeStyle="#222";
+  ctx.fillStyle="#222";
+  if(old){
+    const im=new Image();
+    im.onload=()=>{ctx.drawImage(im,0,0,cssW,cssH); if(grid) drawGridOverlay();};
+    im.src=old;
+  }else if(grid){drawGridOverlay();}
+}
+new ResizeObserver(()=>resizeCanvas(true)).observe(wrap);
+
+function drawGridOverlay(){
+  ctx.save();
+  ctx.strokeStyle="rgba(100,110,130,.14)";
+  ctx.lineWidth=1;
+  for(let x=20;x<cssW;x+=20){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,cssH);ctx.stroke();}
+  for(let y=20;y<cssH;y+=20){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(cssW,y);ctx.stroke();}
+  ctx.restore();
+}
+
+function pos(e){
+  const r=canvas.getBoundingClientRect();
+  return [e.clientX-r.left,e.clientY-r.top];
+}
+function remember(){
+  history.push(canvas.toDataURL("image/png"));
+  if(history.length>30) history.shift();
+}
+function restore(data, after=null){
+  const im=new Image();
+  im.onload=()=>{
+    ctx.clearRect(0,0,cssW,cssH);
+    ctx.drawImage(im,0,0,cssW,cssH);
+    if(after) after();
+  };
+  im.src=data;
+}
+function angleDegrees(x,y){
+  let a=Math.atan2(-(y-sy),x-sx)*180/Math.PI;
+  if(a<0)a+=360;
+  if(a>180)a=360-a;
+  return a;
+}
+function previewShape(x,y){
+  ctx.save();
+  ctx.strokeStyle="#222";
+  ctx.fillStyle="#222";
+  ctx.lineWidth=2;
+
+  if(tool==="line" || tool==="ruler"){
+    ctx.beginPath();ctx.moveTo(sx,sy);ctx.lineTo(x,y);ctx.stroke();
+    if(tool==="ruler"){
+      const px=Math.hypot(x-sx,y-sy);
+      measureEl.textContent="Measured length: "+(px/20).toFixed(1)+" units";
+      ctx.font="13px Arial";
+      ctx.fillText((px/20).toFixed(1)+" units",(sx+x)/2+8,(sy+y)/2-8);
+      // endpoint ticks
+      const a=Math.atan2(y-sy,x-sx), nx=Math.cos(a+Math.PI/2)*6, ny=Math.sin(a+Math.PI/2)*6;
+      ctx.beginPath();ctx.moveTo(sx-nx,sy-ny);ctx.lineTo(sx+nx,sy+ny);
+      ctx.moveTo(x-nx,y-ny);ctx.lineTo(x+nx,y+ny);ctx.stroke();
+    }
+  }
+  if(tool==="compass"){
+    const r=Math.hypot(x-sx,y-sy);
+    ctx.beginPath();ctx.arc(sx,sy,r,0,Math.PI*2);ctx.stroke();
+    ctx.beginPath();ctx.arc(sx,sy,2.5,0,Math.PI*2);ctx.fill();
+    measureEl.textContent="Compass radius: "+(r/20).toFixed(1)+" units";
+  }
+  if(tool==="protractor"){
+    const r=Math.max(35,Math.hypot(x-sx,y-sy));
+    const a=Math.atan2(y-sy,x-sx);
+    const rr=Math.min(65,r*.48);
+    ctx.beginPath();ctx.moveTo(sx,sy);ctx.lineTo(sx+r,sy);
+    ctx.moveTo(sx,sy);ctx.lineTo(x,y);ctx.stroke();
+
+    let aa=a;
+    let start=0,end=aa;
+    if(end<start){let t=start;start=end;end=t}
+    ctx.beginPath();ctx.arc(sx,sy,rr,start,end);ctx.stroke();
+
+    const deg=angleDegrees(x,y);
+    ctx.font="13px Arial";
+    ctx.fillText(deg.toFixed(0)+"°",sx+rr+10,sy-10);
+    measureEl.textContent="Angle: "+deg.toFixed(0)+"°";
+  }
+  ctx.restore();
+}
+
+function pointerStart(e){
+  e.preventDefault();
+  canvas.setPointerCapture?.(e.pointerId);
+  remember();
+  pointerDown=true;
+  [sx,sy]=pos(e);
+  [lastX,lastY]=[sx,sy];
+  baseImage=canvas.toDataURL("image/png");
+  if(tool==="pen" || tool==="eraser"){
+    ctx.beginPath();ctx.moveTo(sx,sy);
+  }
+}
+function pointerMove(e){
+  if(!pointerDown)return;
+  e.preventDefault();
+  const [x,y]=pos(e);
+
+  if(tool==="pen" || tool==="eraser"){
+    ctx.save();
+    ctx.strokeStyle=tool==="eraser" ? "#fffdf0" : "#222";
+    // Use Apple Pencil pressure when available.
+    const pressure=(e.pressure && e.pressure>0) ? e.pressure : .5;
+    ctx.lineWidth=tool==="eraser" ? 20 : Math.max(1.5,1.3+pressure*2.3);
+    ctx.lineTo(x,y);ctx.stroke();ctx.restore();
+    [lastX,lastY]=[x,y];
+  }else{
+    restore(baseImage,()=>previewShape(x,y));
+  }
+}
+function pointerEnd(e){
+  if(!pointerDown)return;
+  e.preventDefault();
+  const [x,y]=pos(e);
+  pointerDown=false;
+  if(!["pen","eraser"].includes(tool)){
+    restore(baseImage,()=>previewShape(x,y));
+  }
+}
+
+canvas.addEventListener("pointerdown",pointerStart,{passive:false});
+canvas.addEventListener("pointermove",pointerMove,{passive:false});
+canvas.addEventListener("pointerup",pointerEnd,{passive:false});
+canvas.addEventListener("pointercancel",pointerEnd,{passive:false});
+
+document.querySelectorAll("[data-tool]").forEach(btn=>{
+  btn.addEventListener("click",()=>{
+    tool=btn.dataset.tool;
+    document.querySelectorAll("[data-tool]").forEach(b=>b.classList.remove("active"));
+    btn.classList.add("active");
+    measureEl.textContent="";
+    statusEl.textContent={
+      pen:"Pencil — Apple Pencil, touch or mouse",
+      line:"Straightedge — drag between two points",
+      compass:"Compass — press centre, drag to set radius",
+      protractor:"Protractor — press vertex, drag second ray",
+      ruler:"Ruler — drag between two points",
+      eraser:"Eraser — drag over unwanted working"
+    }[tool] || tool;
+  });
+});
+document.querySelector('[data-action="undo"]').addEventListener("click",()=>{
+  if(history.length) restore(history.pop());
+});
+document.querySelector('[data-action="clear"]').addEventListener("click",()=>{
+  remember();ctx.clearRect(0,0,cssW,cssH);if(grid)drawGridOverlay();measureEl.textContent="";
+});
+document.getElementById("gridBtn").addEventListener("click",()=>{
+  grid=!grid;
+  document.getElementById("gridBtn").textContent=grid?"Grid ✓":"Grid";
+  // grid is only a visual aid; redraw over current content
+  if(grid)drawGridOverlay();
+  else if(history.length){/* grid will disappear after next edit/restore */}
+});
+document.getElementById("saveBtn").addEventListener("click",()=>{
+  const value={
+    kind:"geometry_board_png",
+    data_url:canvas.toDataURL("image/png"),
+    saved_at:Date.now()
+  };
+  Streamlit.setComponentValue(value);
+  statusEl.textContent="Saved — return to notes below.";
+});
+
+window.addEventListener("message",(event)=>{
+  const data=event.data;
+  if(data && data.type==="streamlit:render"){
+    Streamlit.setFrameHeight(710);
+  }
+});
+
+resizeCanvas(false);
+Streamlit.setComponentReady();
+Streamlit.setFrameHeight(710);
+</script>
+</body>
+</html>

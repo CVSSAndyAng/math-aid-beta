@@ -14,6 +14,7 @@ import json
 import os
 import re
 
+from pathlib import Path
 import html
 import secrets
 import zipfile
@@ -11381,57 +11382,7 @@ def _student_notes():
 
 
 
-def _geometry_working_board(*, key: str, height: int = 720):
-    """Interactive student geometry board with construction tools."""
-    html = r"""
-<!doctype html><html><head>
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<style>
-*{box-sizing:border-box}body{margin:0;font-family:Arial,sans-serif;background:#f7f8fc}
-.wrap{display:flex;height:680px;border:1px solid #d7dbe7;border-radius:14px;overflow:hidden;background:white}
-.tools{width:74px;padding:8px;background:#f1e7ff;border-right:1px solid #d5c5ec;display:flex;flex-direction:column;gap:7px}
-.tool{min-height:48px;border:1px solid #a77bd4;background:#d5adfa;border-radius:10px;font-size:19px;cursor:pointer}
-.tool.active{outline:3px solid #5366df}.board{position:relative;flex:1;background:#fffef0;touch-action:none}
-canvas{position:absolute;inset:0;width:100%;height:100%;touch-action:none}
-.save{position:absolute;right:10px;top:10px;z-index:3;border:1px solid #cbd0dc;background:white;border-radius:8px;padding:9px 12px}
-.status{position:absolute;left:10px;bottom:8px;background:rgba(255,255,255,.9);padding:5px 8px;border-radius:7px;font-size:12px;color:#555}
-</style></head><body>
-<div class="wrap"><div class="tools">
-<button class="tool active" data-tool="pen" title="Pencil">✏️</button>
-<button class="tool" data-tool="line" title="Straightedge">╱</button>
-<button class="tool" data-tool="compass" title="Compass">🧭</button>
-<button class="tool" data-tool="protractor" title="Protractor">◒</button>
-<button class="tool" data-tool="ruler" title="Ruler">📏</button>
-<button class="tool" data-tool="eraser" title="Eraser">⌫</button>
-<button class="tool" data-tool="undo" title="Undo">↶</button>
-<button class="tool" data-tool="clear" title="Clear">CLR</button>
-</div><div class="board" id="board"><canvas id="c"></canvas>
-<button class="save" id="save">💾 Save to notes</button>
-<div class="status" id="status">Pencil — Apple Pencil, touch or mouse</div>
-</div></div>
-<script>
-const c=document.getElementById('c'),b=document.getElementById('board'),x=c.getContext('2d'),s=document.getElementById('status');
-let tool='pen',down=false,sx=0,sy=0,snap='',hist=[];
-function size(){let r=b.getBoundingClientRect();c.width=r.width*devicePixelRatio;c.height=r.height*devicePixelRatio;c.style.width=r.width+'px';c.style.height=r.height+'px';x.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);x.lineCap='round';x.lineJoin='round';x.strokeStyle='#222';x.lineWidth=2} size();
-function pt(e){let r=c.getBoundingClientRect(),p=e.touches?e.touches[0]:e;return[p.clientX-r.left,p.clientY-r.top]}
-function restore(d){let im=new Image();im.onload=()=>{x.clearRect(0,0,c.width,c.height);x.drawImage(im,0,0,c.clientWidth,c.clientHeight)};im.src=d}
-document.querySelectorAll('.tool').forEach(q=>q.onclick=()=>{let t=q.dataset.tool;if(t==='undo'){if(hist.length)restore(hist.pop());return}if(t==='clear'){hist.push(c.toDataURL());x.clearRect(0,0,c.width,c.height);return}tool=t;document.querySelectorAll('.tool').forEach(z=>z.classList.remove('active'));q.classList.add('active');s.textContent={pen:'Pencil — Apple Pencil, touch or mouse',line:'Straightedge — drag between two points',compass:'Compass — drag from centre to radius',protractor:'Protractor — drag a ray from the horizontal baseline',ruler:'Ruler — drag to measure',eraser:'Eraser'}[t]});
-function start(e){e.preventDefault();hist.push(c.toDataURL());if(hist.length>25)hist.shift();down=true;[sx,sy]=pt(e);snap=c.toDataURL();if(tool==='pen'||tool==='eraser'){x.beginPath();x.moveTo(sx,sy)}}
-function preview(px,py){x.save();x.strokeStyle='#222';x.fillStyle='#222';x.lineWidth=2;
- if(tool==='line'||tool==='ruler'){x.beginPath();x.moveTo(sx,sy);x.lineTo(px,py);x.stroke();if(tool==='ruler'){let d=Math.hypot(px-sx,py-sy);x.fillText((d/20).toFixed(1)+' units',(sx+px)/2+5,(sy+py)/2-5)}}
- if(tool==='compass'){let r=Math.hypot(px-sx,py-sy);x.beginPath();x.arc(sx,sy,r,0,Math.PI*2);x.stroke();x.beginPath();x.arc(sx,sy,2,0,Math.PI*2);x.fill()}
- if(tool==='protractor'){let r=Math.hypot(px-sx,py-sy),a=Math.atan2(py-sy,px-sx);x.beginPath();x.moveTo(sx,sy);x.lineTo(sx+r,sy);x.moveTo(sx,sy);x.lineTo(px,py);x.stroke();x.beginPath();x.arc(sx,sy,Math.min(55,r*.45),Math.min(0,a),Math.max(0,a));x.stroke();let d=Math.abs(a*180/Math.PI);if(d>180)d=360-d;x.fillText(d.toFixed(0)+'°',sx+60,sy-8)}
- x.restore()}
-function move(e){if(!down)return;e.preventDefault();let[p,q]=pt(e);if(tool==='pen'||tool==='eraser'){x.save();x.strokeStyle=tool==='eraser'?'#fffef0':'#222';x.lineWidth=tool==='eraser'?18:2;x.lineTo(p,q);x.stroke();x.restore()}else{restore(snap);setTimeout(()=>preview(p,q),0)}}
-function end(e){if(!down)return;down=false;if(!['pen','eraser'].includes(tool)){let ev=e.changedTouches?{touches:[e.changedTouches[0]]}:e,[p,q]=pt(ev);preview(p,q)}}
-['mousedown','touchstart'].forEach(v=>c.addEventListener(v,start,{passive:false}));['mousemove','touchmove'].forEach(v=>c.addEventListener(v,move,{passive:false}));['mouseup','mouseleave','touchend'].forEach(v=>c.addEventListener(v,end,{passive:false}));
-document.getElementById('save').onclick=()=>{window.parent.postMessage({isStreamlitMessage:true,type:'streamlit:setComponentValue',value:c.toDataURL('image/png')},'*')};
-</script></body></html>
-"""
-    return st_components_v1.html(html, height=height, scrolling=False)
-
-
-def _save_geometry_board_data_url(data_url: str, *, caption: str = "Geometry working") -> bool:
+def _save_geometry_board_result(data_url: str, *, caption: str = "Geometry working") -> bool:
     value = str(data_url or "")
     if not value.startswith("data:image/png;base64,"):
         return False
@@ -11446,6 +11397,52 @@ def _save_geometry_board_data_url(data_url: str, *, caption: str = "Geometry wor
         "mime_type": "image/png",
         "name": "geometry_working.png",
     })
+    return True
+
+
+
+_GEOMETRY_BOARD_FRONTEND = Path(__file__).parent / "geometry_board_component"
+_geometry_board_component = st_components_v1.declare_component(
+    "math_buddy_geometry_board",
+    path=str(_GEOMETRY_BOARD_FRONTEND),
+)
+
+
+def _geometry_working_board(*, key: str, height: int = 720):
+    """Two-way Streamlit custom component for geometry construction working."""
+    return _geometry_board_component(
+        key=key,
+        default=None,
+    )
+
+
+def _save_geometry_board_result(result, *, caption: str = "Geometry construction / working") -> bool:
+    """Store a returned geometry-board PNG in the persistent student notes."""
+    if not isinstance(result, dict):
+        return False
+    if result.get("kind") != "geometry_board_png":
+        return False
+    data_url = str(result.get("data_url") or "")
+    if not data_url.startswith("data:image/png;base64,"):
+        return False
+    try:
+        image_bytes = base64.b64decode(data_url.split(",", 1)[1])
+    except Exception:
+        return False
+
+    # Avoid adding the same save event again on Streamlit reruns.
+    save_id = str(result.get("saved_at") or "")
+    if save_id and st.session_state.get("_last_geometry_board_save_id") == save_id:
+        return False
+
+    st.session_state.setdefault("student_lesson_notes", []).append({
+        "type": "image",
+        "content": image_bytes,
+        "caption": caption,
+        "mime_type": "image/png",
+        "name": "geometry_construction.png",
+    })
+    st.session_state["_last_geometry_board_save_id"] = save_id
     return True
 
 
@@ -12275,11 +12272,11 @@ if role_mode == "For Student":
 
         with st.expander("📐 Geometry construction board", expanded=False):
 
-            st.caption("Use Apple Pencil, touch or mouse. Includes pencil, straightedge, compass, protractor, ruler, eraser, undo and clear.")
+            st.caption("Use Apple Pencil, touch or mouse. Choose Pencil, Line, Compass, Protractor, Ruler or Eraser from the labelled toolbar. Press Save to notes when finished.")
 
             geometry_board_result = _geometry_working_board(key="student_lesson_geometry_board", height=720)
 
-            if geometry_board_result and _save_geometry_board_data_url(geometry_board_result, caption="Geometry construction / working"):
+            if geometry_board_result and _save_geometry_board_result(geometry_board_result, caption="Geometry construction / working"):
 
                 st.success("Geometry working saved to lesson notes.")
 
