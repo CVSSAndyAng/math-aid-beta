@@ -38,6 +38,10 @@ canvas{position:absolute;inset:0;width:100%;height:100%;touch-action:none;cursor
   font-size:13px;cursor:pointer;box-shadow:0 1px 2px rgba(0,0,0,.04)
 }
 .action.primary{background:#5f61df;color:white;border-color:#5f61df}
+.length-control{display:none;align-items:center;gap:6px;background:white;border:1px solid #cbd2df;border-radius:9px;padding:5px 8px;font-size:12px;color:#444}
+.length-control.visible{display:flex}
+.length-control input{width:72px;border:1px solid #b8bfd0;border-radius:6px;padding:4px 6px;font:inherit}
+.length-control input:focus{outline:2px solid #8d7deb;outline-offset:1px}
 .status{
   position:absolute;left:12px;bottom:10px;z-index:20;background:rgba(255,255,255,.94);
   border:1px solid #e0e3eb;border-radius:8px;padding:6px 9px;font-size:12px;color:#555;
@@ -77,6 +81,10 @@ canvas{position:absolute;inset:0;width:100%;height:100%;touch-action:none;cursor
   <div class="board-wrap" id="boardWrap">
     <canvas id="canvas"></canvas>
     <div class="top-actions">
+      <label class="length-control" id="lengthControl">Line length
+        <input id="lineLength" type="number" min="0.1" max="50" step="0.1" inputmode="decimal" placeholder="free">
+        <span>units</span>
+      </label>
       <button class="action" id="gridBtn">Grid</button>
       <button class="action primary" id="saveBtn">💾 Save to notes</button>
     </div>
@@ -96,12 +104,16 @@ const Streamlit={
 const canvas=document.getElementById("canvas");
 const wrap=document.getElementById("boardWrap");
 const ctx=canvas.getContext("2d");
+const drawingCanvas=document.createElement("canvas");
+const dctx=drawingCanvas.getContext("2d");
 const statusEl=document.getElementById("status");
 const measureEl=document.getElementById("measure");
 const hintEl=document.getElementById("instrumentHint");
+const lengthControl=document.getElementById("lengthControl");
+const lineLengthInput=document.getElementById("lineLength");
 
 let cssW=0,cssH=0,dpr=1,tool="pen",pointerDown=false;
-let sx=0,sy=0,baseImage=null,history=[],grid=false;
+let sx=0,sy=0,baseImage=null,history=[],grid=false,linePreview=null;
 
 let compass={
   visible:false,
@@ -125,25 +137,27 @@ let protractor={
 };
 
 function resizeCanvas(preserve=true){
-  const old=preserve?canvas.toDataURL("image/png"):null;
+  const old=preserve&&drawingCanvas.width?drawingCanvas.toDataURL("image/png"):null;
   const r=wrap.getBoundingClientRect();
   cssW=Math.max(320,Math.floor(r.width));cssH=Math.max(420,Math.floor(r.height));
   dpr=Math.max(1,window.devicePixelRatio||1);
   canvas.width=Math.floor(cssW*dpr);canvas.height=Math.floor(cssH*dpr);
+  drawingCanvas.width=Math.floor(cssW*dpr);drawingCanvas.height=Math.floor(cssH*dpr);
   canvas.style.width=cssW+"px";canvas.style.height=cssH+"px";
   ctx.setTransform(dpr,0,0,dpr,0,0);
-  ctx.lineCap="round";ctx.lineJoin="round";
-  if(old){const im=new Image();im.onload=()=>{ctx.drawImage(im,0,0,cssW,cssH);redrawOverlay()};im.src=old}
+  dctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.lineCap=dctx.lineCap="round";ctx.lineJoin=dctx.lineJoin="round";
+  if(old){const im=new Image();im.onload=()=>{dctx.drawImage(im,0,0,cssW,cssH);redrawOverlay()};im.src=old}
   else redrawOverlay();
 }
 new ResizeObserver(()=>resizeCanvas(true)).observe(wrap);
 
 function pos(e){const r=canvas.getBoundingClientRect();return[e.clientX-r.left,e.clientY-r.top]}
 function dist(x1,y1,x2,y2){return Math.hypot(x2-x1,y2-y1)}
-function remember(){history.push(canvas.toDataURL("image/png"));if(history.length>30)history.shift()}
+function remember(){history.push(drawingCanvas.toDataURL("image/png"));if(history.length>30)history.shift()}
 function restore(data,after=null){
   const im=new Image();
-  im.onload=()=>{ctx.clearRect(0,0,cssW,cssH);ctx.drawImage(im,0,0,cssW,cssH);if(after)after()};
+  im.onload=()=>{dctx.clearRect(0,0,cssW,cssH);dctx.drawImage(im,0,0,cssW,cssH);if(after)after();else redrawOverlay()};
   im.src=data
 }
 function angleNorm(a){while(a<0)a+=Math.PI*2;while(a>=Math.PI*2)a-=Math.PI*2;return a}
@@ -262,18 +276,27 @@ function drawProtractor(){
 }
 
 function redrawOverlay(){
+  ctx.clearRect(0,0,cssW,cssH);
+  ctx.drawImage(drawingCanvas,0,0,cssW,cssH);
   if(grid)drawGridOverlay();
+  if(linePreview){
+    ctx.save();ctx.strokeStyle="#222";ctx.lineWidth=2;
+    ctx.beginPath();ctx.moveTo(linePreview.x1,linePreview.y1);ctx.lineTo(linePreview.x2,linePreview.y2);ctx.stroke();ctx.restore()
+  }
   drawCompass();
   drawProtractor();
 }
 
 function setTool(t){
+  if(tool===t && (t==="compass"||t==="protractor"))t="pen";
   tool=t;
+  linePreview=null;
   document.querySelectorAll("[data-tool]").forEach(b=>b.classList.toggle("active",b.dataset.tool===t));
   compass.visible=t==="compass";
   protractor.visible=t==="protractor";
   measureEl.textContent="";
   hintEl.style.display=(t==="compass"||t==="protractor")?"block":"none";
+  lengthControl.classList.toggle("visible",t==="line"||t==="ruler");
   if(t==="compass"){
     statusEl.textContent="Compass — drag hinge to move; drag white handles to change opening; drag pencil tip around needle to draw an arc";
     hintEl.textContent="Compass: hinge = move • white handles = opening • pencil tip = sweep arc"
@@ -284,13 +307,13 @@ function setTool(t){
     hintEl.style.display="none";
     statusEl.textContent={
       pen:"Pencil — Apple Pencil, touch or mouse",
-      line:"Straightedge — drag between two points",
+      line:"Line — optionally type an exact length, then drag to choose direction",
       ruler:"Ruler — drag between two points",
       eraser:"Eraser — drag over unwanted working"
     }[t]||t
   }
-  baseImage=canvas.toDataURL("image/png");
-  restore(baseImage,redrawOverlay)
+  baseImage=drawingCanvas.toDataURL("image/png");
+  redrawOverlay()
 }
 
 document.querySelectorAll("[data-tool]").forEach(btn=>btn.addEventListener("click",()=>setTool(btn.dataset.tool)));
@@ -320,9 +343,9 @@ function commitArc(prevAngle,newAngle){
   // arc centre is needle point; radius equals distance needle->pencil
   const pencil=pointFrom(c.cx,c.cy,c.radius,c.pencilAngle);
   const rr=dist(needle[0],needle[1],pencil[0],pencil[1]);
-  const a1=prevAngle,a2=newAngle;
-  ctx.save();ctx.strokeStyle="#222";ctx.lineWidth=2;
-  ctx.beginPath();ctx.arc(needle[0],needle[1],rr,a1,a2,a2<a1);ctx.stroke();ctx.restore()
+  const delta=shortestDelta(newAngle,prevAngle);
+  dctx.save();dctx.strokeStyle="#222";dctx.lineWidth=2;
+  dctx.beginPath();dctx.arc(needle[0],needle[1],rr,prevAngle,prevAngle+delta,delta<0);dctx.stroke();dctx.restore()
 }
 
 function pointerStart(e){
@@ -336,7 +359,8 @@ function pointerStart(e){
       compass.dragging=h;
       if(h==="pencil"){
         const needle=pointFrom(compass.cx,compass.cy,compass.radius,compass.needleAngle);
-        compass.sweepStart=Math.atan2(y-needle[1],x-needle[0]);
+        const pencil=pointFrom(compass.cx,compass.cy,compass.radius,compass.pencilAngle);
+        compass.sweepStart=Math.atan2(pencil[1]-needle[1],pencil[0]-needle[0]);
         compass.sweepLast=compass.sweepStart
       }
       pointerDown=true;return
@@ -352,8 +376,8 @@ function pointerStart(e){
     }
   }
 
-  remember();pointerDown=true;[sx,sy]=[x,y];baseImage=canvas.toDataURL("image/png");
-  if(tool==="pen"||tool==="eraser"){ctx.beginPath();ctx.moveTo(sx,sy)}
+  remember();pointerDown=true;[sx,sy]=[x,y];baseImage=drawingCanvas.toDataURL("image/png");
+  if(tool==="pen"||tool==="eraser"){dctx.beginPath();dctx.moveTo(sx,sy)}
 }
 
 function pointerMove(e){
@@ -371,10 +395,17 @@ function pointerMove(e){
     }else if(c.dragging==="pencil"){
       const needle=pointFrom(c.cx,c.cy,c.radius,c.needleAngle);
       const ang=Math.atan2(y-needle[1],x-needle[0]);
+      const delta=shortestDelta(ang,c.sweepLast);
       commitArc(c.sweepLast,ang);
-      c.sweepLast=ang;
-      // keep pencil tip on arc around needle; derive hinge->pencil angle approximately from cursor
-      c.pencilAngle=Math.atan2(y-c.cy,x-c.cx)
+      const oldPencil=pointFrom(c.cx,c.cy,c.radius,c.pencilAngle);
+      const hx=c.cx-needle[0],hy=c.cy-needle[1];
+      const px=oldPencil[0]-needle[0],py=oldPencil[1]-needle[1];
+      const cos=Math.cos(delta),sin=Math.sin(delta);
+      c.cx=needle[0]+hx*cos-hy*sin;c.cy=needle[1]+hx*sin+hy*cos;
+      const newPencil=[needle[0]+px*cos-py*sin,needle[1]+px*sin+py*cos];
+      c.needleAngle=Math.atan2(needle[1]-c.cy,needle[0]-c.cx);
+      c.pencilAngle=Math.atan2(newPencil[1]-c.cy,newPencil[0]-c.cx);
+      c.sweepLast=ang
     }
     measureEl.textContent="Compass opening: "+(c.radius/20).toFixed(1)+" units";
     redrawOverlay();return
@@ -389,30 +420,40 @@ function pointerMove(e){
   }
 
   if(tool==="pen"||tool==="eraser"){
-    ctx.save();ctx.strokeStyle=tool==="eraser"?"#fffdf0":"#222";
+    dctx.save();dctx.strokeStyle=tool==="eraser"?"#fffdf0":"#222";
     const pressure=(e.pressure&&e.pressure>0)?e.pressure:.5;
-    ctx.lineWidth=tool==="eraser"?20:Math.max(1.5,1.3+pressure*2.3);
-    ctx.lineTo(x,y);ctx.stroke();ctx.restore();return
+    dctx.lineWidth=tool==="eraser"?20:Math.max(1.5,1.3+pressure*2.3);
+    dctx.lineTo(x,y);dctx.stroke();dctx.restore();redrawOverlay();return
   }
 
   if(tool==="line"||tool==="ruler"){
-    restore(baseImage,()=>{
-      ctx.save();ctx.strokeStyle="#222";ctx.lineWidth=2;
-      ctx.beginPath();ctx.moveTo(sx,sy);ctx.lineTo(x,y);ctx.stroke();
-      if(tool==="ruler"){
-        const px=Math.hypot(x-sx,y-sy);
-        ctx.font="13px Arial";ctx.fillStyle="#222";
-        ctx.fillText((px/20).toFixed(1)+" units",(sx+x)/2+8,(sy+y)/2-8);
-        measureEl.textContent="Measured length: "+(px/20).toFixed(1)+" units"
-      }
-      ctx.restore();redrawOverlay()
-    })
+    let dx=x-sx,dy=y-sy;
+    let px=Math.hypot(dx,dy);
+    const exact=Number.parseFloat(lineLengthInput.value);
+    if(Number.isFinite(exact)&&exact>0){
+      const target=exact*20;
+      if(px<1){dx=target;dy=0}else{dx=dx/px*target;dy=dy/px*target}
+      px=target
+    }
+    linePreview={x1:sx,y1:sy,x2:sx+dx,y2:sy+dy};
+    measureEl.textContent="Line length: "+(px/20).toFixed(1)+" units";
+    redrawOverlay();return
   }
 }
 
 function pointerEnd(e){
   if(!pointerDown)return;
   pointerDown=false;
+  if((tool==="line"||tool==="ruler")&&linePreview){
+    dctx.save();dctx.strokeStyle="#222";dctx.lineWidth=2;
+    dctx.beginPath();dctx.moveTo(linePreview.x1,linePreview.y1);dctx.lineTo(linePreview.x2,linePreview.y2);dctx.stroke();
+    if(tool==="ruler"){
+      const px=Math.hypot(linePreview.x2-linePreview.x1,linePreview.y2-linePreview.y1);
+      dctx.font="13px Arial";dctx.fillStyle="#222";
+      dctx.fillText((px/20).toFixed(1)+" units",(linePreview.x1+linePreview.x2)/2+8,(linePreview.y1+linePreview.y2)/2-8)
+    }
+    dctx.restore();linePreview=null;redrawOverlay()
+  }
   if(tool==="compass")compass.dragging=null;
   if(tool==="protractor")protractor.dragging=null
 }
@@ -424,7 +465,7 @@ canvas.addEventListener("pointercancel",pointerEnd,{passive:false});
 
 document.querySelector('[data-action="undo"]').addEventListener("click",()=>{if(history.length)restore(history.pop(),redrawOverlay)});
 document.querySelector('[data-action="clear"]').addEventListener("click",()=>{
-  remember();ctx.clearRect(0,0,cssW,cssH);if(grid)drawGridOverlay();redrawOverlay();measureEl.textContent=""
+  remember();dctx.clearRect(0,0,cssW,cssH);linePreview=null;redrawOverlay();measureEl.textContent=""
 });
 document.getElementById("gridBtn").addEventListener("click",()=>{
   grid=!grid;document.getElementById("gridBtn").textContent=grid?"Grid ✓":"Grid";redrawOverlay()
