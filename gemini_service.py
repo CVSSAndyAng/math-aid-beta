@@ -2180,6 +2180,18 @@ STRICT QUESTION STRUCTURE CONTRACT:
 - Use tables for naturally tabular data such as survey response options and frequency data.
 - Construction instructions stay in prose with only lengths/angles rendered mathematically.
 
+EXAM-DIAGRAM QUALITY CONTRACT:
+- Diagrams must resemble clean examination/textbook technical figures, not generic illustrations.
+- Use restrained line weights, plain backgrounds and compact proportions.
+- Mounted solids must visibly sit on the supporting face; do not draw hidden contact faces through the support.
+- Put dimension arrows outside the object wherever practical.
+- Use short extension lines from the measured edge to the dimension line.
+- Do not let arrows, labels or leaders cross the solid unnecessarily.
+- Keep perspective consistent across all faces of a composite solid.
+- Do not distort a cylinder/cone so much that it no longer appears proportional to the supporting solid.
+- Radius labels should use a thin leader from the relevant circular face.
+- A diagram should occupy the page efficiently without excessive white space.
+
 DIAGRAM RELEVANCE CONTRACT:
 - Every diagram must be directly required by or clearly support the question.
 - Never attach a generic graph, stock image or unrelated geometry diagram merely because the topic is visual.

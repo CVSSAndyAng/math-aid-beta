@@ -7555,18 +7555,216 @@ def render_dimensioned_solid_png(spec: dict, *, width=900, height=620) -> bytes:
         R=_solid_num(spec.get("cylinder_radius"),3)
         CH=_solid_num(spec.get("cylinder_height"),10)
 
-        # Geometry closely follows the supplied SVG logic.
-        cub=_draw_cuboid_iso(draw,220,330,300,130,80)
-        cyl=_draw_cylinder(draw,370,145,65,180)
+        # --------------------------------------------------------------
+        # Examination-style proportions
+        # --------------------------------------------------------------
+        # Keep the whole figure compact and centred.
+        cub_x = 205
+        cub_top_y = 320
+        cub_w = 315
+        cub_h = 125
+        depth_px = 88
+        depth_dy = -52
 
-        _draw_dimension(draw,(220,485),(520,485),_solid_label(L,unit),font)
-        _draw_dimension(draw,(205,330),(205,460),_solid_label(H,unit),font)
-        _draw_dimension(draw,(535,475),(615,425),_solid_label(D,unit),font)
-        _draw_dimension(draw,(455,145),(455,325),_solid_label(CH,unit),font)
-        # radius leader
-        draw.line((370,145,435,145),fill=(15,110,86),width=2)
-        draw.line((410,145,610,105),fill=(125,125,125),width=1)
-        draw.text((620,98),f"r = {_solid_label(R,unit)}",fill=(55,55,55),font=font)
+        cuboid_front = (226, 238, 250)
+        cuboid_side = (205, 224, 244)
+        cuboid_top = (239, 246, 252)
+        cuboid_edge = (76, 115, 156)
+
+        cyl_fill = (224, 245, 238)
+        cyl_edge = (36, 124, 99)
+
+        # Cuboid: top, right and front faces.
+        top_face = [
+            (cub_x, cub_top_y),
+            (cub_x + cub_w, cub_top_y),
+            (cub_x + cub_w + depth_px, cub_top_y + depth_dy),
+            (cub_x + depth_px, cub_top_y + depth_dy),
+        ]
+        right_face = [
+            (cub_x + cub_w, cub_top_y),
+            (cub_x + cub_w, cub_top_y + cub_h),
+            (cub_x + cub_w + depth_px, cub_top_y + cub_h + depth_dy),
+            (cub_x + cub_w + depth_px, cub_top_y + depth_dy),
+        ]
+
+        draw.polygon(top_face, fill=cuboid_top, outline=cuboid_edge)
+        draw.polygon(right_face, fill=cuboid_side, outline=cuboid_edge)
+        draw.rectangle(
+            (cub_x, cub_top_y, cub_x + cub_w, cub_top_y + cub_h),
+            fill=cuboid_front,
+            outline=cuboid_edge,
+            width=2,
+        )
+        draw.line(top_face + [top_face[0]], fill=cuboid_edge, width=2)
+        draw.line(right_face + [right_face[0]], fill=cuboid_edge, width=2)
+
+        # --------------------------------------------------------------
+        # Cylinder seated centrally on the cuboid top face.
+        # The lower circular face is NOT drawn as a complete ellipse,
+        # because it is in contact with the cuboid and is not visible.
+        # --------------------------------------------------------------
+        top_face_cx = cub_x + cub_w * 0.52
+        top_face_cy = cub_top_y + depth_dy * 0.46
+
+        cyl_rx = 54
+        cyl_ry = 16
+        cyl_h = 158
+        cyl_bottom_y = int(top_face_cy + 1)
+        cyl_top_y = cyl_bottom_y - cyl_h
+        cyl_cx = int(top_face_cx)
+
+        # Cylinder body.
+        draw.rectangle(
+            (cyl_cx - cyl_rx, cyl_top_y, cyl_cx + cyl_rx, cyl_bottom_y),
+            fill=cyl_fill,
+            outline=None,
+        )
+        draw.line(
+            (cyl_cx - cyl_rx, cyl_top_y, cyl_cx - cyl_rx, cyl_bottom_y),
+            fill=cyl_edge,
+            width=2,
+        )
+        draw.line(
+            (cyl_cx + cyl_rx, cyl_top_y, cyl_cx + cyl_rx, cyl_bottom_y),
+            fill=cyl_edge,
+            width=2,
+        )
+
+        # Top ellipse.
+        draw.ellipse(
+            (
+                cyl_cx - cyl_rx,
+                cyl_top_y - cyl_ry,
+                cyl_cx + cyl_rx,
+                cyl_top_y + cyl_ry,
+            ),
+            fill=(235, 250, 244),
+            outline=cyl_edge,
+            width=2,
+        )
+
+        # Only the front visible arc at the contact line.
+        draw.arc(
+            (
+                cyl_cx - cyl_rx,
+                cyl_bottom_y - cyl_ry,
+                cyl_cx + cyl_rx,
+                cyl_bottom_y + cyl_ry,
+            ),
+            0,
+            180,
+            fill=cyl_edge,
+            width=2,
+        )
+
+        # Re-draw the visible part of the cuboid top/front boundary in front
+        # of the cylinder contact point for a cleaner mounted appearance.
+        draw.line(
+            (cub_x, cub_top_y, cub_x + cub_w, cub_top_y),
+            fill=cuboid_edge,
+            width=2,
+        )
+
+        # Radius on top face.
+        draw.ellipse(
+            (cyl_cx - 2, cyl_top_y - 2, cyl_cx + 2, cyl_top_y + 2),
+            fill=cyl_edge,
+        )
+        draw.line(
+            (cyl_cx, cyl_top_y, cyl_cx + cyl_rx, cyl_top_y),
+            fill=cyl_edge,
+            width=2,
+        )
+
+        # --------------------------------------------------------------
+        # Dimension style:
+        # dimension arrows outside the object with short extension lines.
+        # --------------------------------------------------------------
+        dim = (83, 83, 83)
+        ext = (145, 145, 145)
+
+        # Cuboid length.
+        y_len = cub_top_y + cub_h + 35
+        draw.line((cub_x, cub_top_y + cub_h, cub_x, y_len - 5), fill=ext, width=1)
+        draw.line((cub_x + cub_w, cub_top_y + cub_h, cub_x + cub_w, y_len - 5), fill=ext, width=1)
+        _draw_dimension(
+            draw,
+            (cub_x, y_len),
+            (cub_x + cub_w, y_len),
+            _solid_label(L, unit),
+            font,
+            fill=dim,
+        )
+
+        # Cuboid height.
+        x_h = cub_x - 35
+        draw.line((cub_x, cub_top_y, x_h + 5, cub_top_y), fill=ext, width=1)
+        draw.line((cub_x, cub_top_y + cub_h, x_h + 5, cub_top_y + cub_h), fill=ext, width=1)
+        _draw_dimension(
+            draw,
+            (x_h, cub_top_y),
+            (x_h, cub_top_y + cub_h),
+            _solid_label(H, unit),
+            font,
+            fill=dim,
+        )
+
+        # Cuboid depth.
+        p1 = (cub_x + cub_w + 10, cub_top_y + cub_h + 12)
+        p2 = (cub_x + cub_w + depth_px + 10, cub_top_y + cub_h + depth_dy + 12)
+        draw.line(
+            (cub_x + cub_w, cub_top_y + cub_h, p1[0] - 4, p1[1] - 4),
+            fill=ext,
+            width=1,
+        )
+        draw.line(
+            (
+                cub_x + cub_w + depth_px,
+                cub_top_y + cub_h + depth_dy,
+                p2[0] - 4,
+                p2[1] - 4,
+            ),
+            fill=ext,
+            width=1,
+        )
+        _draw_dimension(
+            draw,
+            p1,
+            p2,
+            _solid_label(D, unit),
+            font,
+            fill=dim,
+        )
+
+        # Cylinder height: outside right of cylinder.
+        x_ch = cyl_cx + cyl_rx + 35
+        draw.line((cyl_cx + cyl_rx, cyl_top_y, x_ch - 5, cyl_top_y), fill=ext, width=1)
+        draw.line((cyl_cx + cyl_rx, cyl_bottom_y, x_ch - 5, cyl_bottom_y), fill=ext, width=1)
+        _draw_dimension(
+            draw,
+            (x_ch, cyl_top_y),
+            (x_ch, cyl_bottom_y),
+            _solid_label(CH, unit),
+            font,
+            fill=dim,
+        )
+
+        # Radius leader: thin and unobtrusive.
+        leader_start = (cyl_cx + int(cyl_rx * 0.55), cyl_top_y)
+        leader_end = (cyl_cx + 175, cyl_top_y - 42)
+        draw.line(
+            (leader_start[0], leader_start[1], leader_end[0], leader_end[1]),
+            fill=ext,
+            width=1,
+        )
+        draw.text(
+            (leader_end[0] + 8, leader_end[1] - 7),
+            f"r = {_solid_label(R, unit)}",
+            fill=(55,55,55),
+            font=font,
+        )
+
 
     elif t in {"cuboid","cube"}:
         if t=="cube":
