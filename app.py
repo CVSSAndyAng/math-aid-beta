@@ -11392,7 +11392,7 @@ _GEOMETRY_BOARD_HTML = _GEOMETRY_BOARD_SOURCE.read_text(encoding="utf-8")
 
 def _prepare_geometry_board_frontend() -> Path:
     """Materialise the embedded component in a writable runtime directory."""
-    runtime_dir = Path(tempfile.gettempdir()) / "math_buddy_geometry_board_component_v5"
+    runtime_dir = Path(tempfile.gettempdir()) / "math_buddy_geometry_board_component_v6"
     runtime_dir.mkdir(parents=True, exist_ok=True)
     index_file = runtime_dir / "index.html"
     try:
@@ -11406,7 +11406,7 @@ def _prepare_geometry_board_frontend() -> Path:
 
 _GEOMETRY_BOARD_FRONTEND = _prepare_geometry_board_frontend()
 _geometry_board_component = st_components_v1.declare_component(
-    "math_buddy_geometry_board_v5",
+    "math_buddy_geometry_board_v6",
     path=str(_GEOMETRY_BOARD_FRONTEND),
 )
 
