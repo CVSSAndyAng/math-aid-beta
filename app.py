@@ -8950,6 +8950,34 @@ def audit_diagram_relevance(draft) -> list[str]:
     return issues
 
 
+
+def _context_image_should_be_suppressed(question) -> bool:
+    """Suppress generic/multi-object context images when the question requires specific objects."""
+    text = " ".join([
+        str(getattr(question, "stem_text", "") or ""),
+        " ".join(str(getattr(p, "prompt_text", "") or "") for p in (getattr(question, "parts", []) or [])),
+    ]).lower()
+
+    # Similar-object questions require an exact clean pair, not a stock image with extra objects.
+    if "similar" in text and re.search(
+        r"\b(jug|jugs|container|containers|cylinder|cylindrical|vessel|vessels|bottle|bottles)\b",
+        text,
+    ):
+        return True
+
+    # Mathematical geometry/mensuration diagrams should use deterministic drawings.
+    if re.search(
+        r"\b(cuboid|cube|cylinder|cone|sphere|hemisphere|prism|polygon|triangle|quadrilateral)\b",
+        text,
+    ) and re.search(
+        r"\b(radius|diameter|height|length|breadth|width|volume|surface area|similar|scale factor|angle)\b",
+        text,
+    ):
+        return True
+
+    return False
+
+
 def render_setter_preview(draft: ExamPaperDraft) -> None:
     """Render the generated assessment paper with MathIO for all mathematics."""
     st.markdown("### Generated paper preview")

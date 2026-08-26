@@ -2192,6 +2192,14 @@ EXAM-DIAGRAM QUALITY CONTRACT:
 - Radius labels should use a thin leader from the relevant circular face.
 - A diagram should occupy the page efficiently without excessive white space.
 
+CONTEXT-IMAGE OBJECT COUNT CONTRACT:
+- A context image must contain only objects relevant to the question.
+- If the question refers to exactly two similar jugs/containers, show exactly two similar jugs/containers and no boxes, cans, jars or other extra objects.
+- If the question refers to one object, do not use a stock image containing several unrelated objects.
+- If an available internet image contains more relevant object types/items than the question context, reject that image.
+- Prefer a deterministic mathematical drawing over an approximate stock/context image.
+- Context images are optional. Use no image rather than a visually misleading image.
+
 DIAGRAM RELEVANCE CONTRACT:
 - Every diagram must be directly required by or clearly support the question.
 - Never attach a generic graph, stock image or unrelated geometry diagram merely because the topic is visual.
