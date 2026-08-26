@@ -11401,6 +11401,8 @@ def _save_geometry_board_result(data_url: str, *, caption: str = "Geometry worki
 
 
 
+import streamlit.components.v1 as st_components_v1  # local guard for geometry-board component
+
 _GEOMETRY_BOARD_FRONTEND = Path(__file__).parent / "geometry_board_component"
 _geometry_board_component = st_components_v1.declare_component(
     "math_buddy_geometry_board",
