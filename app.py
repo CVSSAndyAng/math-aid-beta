@@ -55,6 +55,7 @@ from gemini_service import (
     evaluate_practice_attempt,
     generate_followup_practice_question,
     generate_guided_solution,
+    regenerate_question_variant,
     generate_paper_question_solution,
     generate_exam_paper_draft,
     generate_visual_explanation,
@@ -8433,6 +8434,61 @@ def audit_generated_graphs(draft) -> list[str]:
     return issues
 
 
+
+
+def _regenerative_instruction_block() -> str:
+    """Shared contract for generating fresh variants from uploaded/source questions."""
+    return """
+REGENERATIVE GENERATION CONTRACT
+- Treat uploaded/reference questions as exemplars of topic, structure, difficulty and assessment style.
+- NEVER reproduce the source question verbatim or near-verbatim.
+- Preserve the underlying mathematical skill and learning outcome.
+- Change at least THREE of the following whenever mathematically possible:
+  1. numerical values,
+  2. algebraic variables/letters,
+  3. geometric dimensions,
+  4. object names or real-life context,
+  5. diagram measurements,
+  6. ordering of information,
+  7. sub-question structure,
+  8. representation (equation/table/diagram/context).
+- Keep the regenerated question internally consistent and fully solvable.
+- Recalculate all derived values, answers, graph coordinates, tables and diagram labels.
+- For geometry/mensuration, regenerate dimensions and rebuild the diagram from those new dimensions.
+- For algebra, vary coefficients/constants and, where appropriate, variable letters.
+- For statistics, regenerate a coherent dataset/table/graph rather than merely changing labels.
+- For trigonometry/graphs, regenerate parameters while preserving the intended concept.
+- If the source includes a diagram, create a new deterministic diagram matching the new values.
+- Do not reuse distinctive names, exact sentences or unique numbers from the source unless mathematically necessary.
+""".strip()
+
+
+def _regenerative_signature(text: str) -> str:
+    """Normalize a source question so near-copy variants can be detected."""
+    value = re.sub(r"\s+", " ", str(text or "")).strip().lower()
+    value = re.sub(r"\d+(?:\.\d+)?", "#", value)
+    value = re.sub(r"\b[a-z]\b", "v", value)
+    return value[:1200]
+
+
+def _looks_too_similar(source_text: str, generated_text: str) -> bool:
+    """Conservative near-copy detector used before surfacing generated variants."""
+    a = _regenerative_signature(source_text)
+    b = _regenerative_signature(generated_text)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+
+    # Token-overlap check after numbers/variables are normalized.
+    ta = set(re.findall(r"[a-z]{3,}", a))
+    tb = set(re.findall(r"[a-z]{3,}", b))
+    if not ta or not tb:
+        return False
+    overlap = len(ta & tb) / max(1, len(ta | tb))
+    return overlap >= 0.84
+
+
 def render_setter_preview(draft: ExamPaperDraft) -> None:
     """Render the generated assessment paper with MathIO for all mathematics."""
     st.markdown("### Generated paper preview")
@@ -9314,6 +9370,7 @@ if role_mode == "For Teacher":
                                 source_syllabus_notes,
                                 _TABLE_GENERATION_REQUIREMENTS,
                                 _SOLID3D_GENERATION_REQUIREMENTS,
+                                _regenerative_instruction_block(),
                             ]
                             if x
                         )
@@ -11447,6 +11504,51 @@ if role_mode == "For Student":
                     student_ask_question,
                     key_base="student_ask_construction",
                 )
+
+            
+        st.markdown("### 🔄 Regenerate this question")
+        st.caption(
+            "Create a fresh question on the same topic and skill with different values, "
+            "variables, dimensions or context."
+        )
+        if st.button(
+            "Generate a fresh similar question",
+            key="student_ask_regenerate_question",
+            use_container_width=True,
+        ):
+            source_for_regen = str(student_ask_question or "").strip()
+            has_regen_upload = bool(browser_question_files or student_ask_handwriting_asset)
+            if not source_for_regen and not has_regen_upload:
+                st.warning("Enter or upload a question first.")
+            else:
+                try:
+                    regen_assets = uploaded_assets(browser_question_files)
+                    if student_ask_handwriting_asset is not None:
+                        regen_assets.insert(0, student_ask_handwriting_asset)
+
+                    regenerated = regenerate_question_variant(
+                        track_label=str(
+                            st.session_state.get("track_label")
+                            or st.session_state.get("selected_track_label")
+                            or "Singapore SEC Mathematics"
+                        ),
+                        source_question_text=source_for_regen,
+                        source_assets=regen_assets,
+                        variation_level="Similar",
+                        api_key=get_api_key(),
+                        model=DEFAULT_MODEL,
+                    )
+                    regen_text = str(regenerated or "").strip()
+                    if regen_text:
+                        st.session_state["student_regenerated_question"] = regen_text
+                except Exception as exc:
+                    st.warning(f"Could not regenerate the question: {type(exc).__name__}: {exc}")
+
+        regenerated_text = st.session_state.get("student_regenerated_question", "")
+        if regenerated_text:
+            with st.container(border=True):
+                st.markdown("#### Fresh similar question")
+                render_mathio_mixed(regenerated_text)
 
             st.markdown("---")
             if st.button(

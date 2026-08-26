@@ -2095,6 +2095,17 @@ You are setting an original Singapore secondary Mathematics assessment paper.
 REFERENCE MODE
 {reference_mode_note}
 
+REGENERATIVE SOURCE CONTRACT
+- Uploaded/reference papers are exemplars only. Infer topic, skill, difficulty, layout and assessment style.
+- Do not copy or lightly paraphrase a source question.
+- For each generated question, preserve the underlying skill but regenerate values, variables, dimensions, context and/or representation.
+- Change at least three meaningful surface features where mathematically possible.
+- Recompute all answers and regenerate any table, graph or diagram from the new values.
+- Geometry diagrams must match the regenerated dimensions exactly.
+- Statistics questions must use a new coherent dataset, not the source values with cosmetic edits.
+- Algebra questions should vary coefficients/constants and variable letters where appropriate.
+- If a reference contains distinctive names or story contexts, use different ones.
+
 
 GRAPH-READING FAIL-SAFE:
 - If the printed stem says "the graph shows", "the diagram shows the graph", "the graph below",
@@ -2121,6 +2132,11 @@ MATRIX AND VECTOR NOTATION CONTRACT:
 - For directed line segments, use \overrightarrow{{AB}}.
 - Keep prose such as "Given", "find", "calculate" in prose fields and the matrix/vector expression
   in MathIO/equation fields.
+
+STUDENT REGENERATIVE CONTRACT:
+- When asked to generate a similar/new question from a student-uploaded question, preserve the mathematical topic and intended skill but regenerate values, variables, dimensions, names, context and diagram data.
+- Never reproduce the source wording or numbers verbatim unless mathematically unavoidable.
+- Recalculate the answer and any dependent measurements internally before returning the new question.
 
 GUIDANCE TEXT/MATH CHANNEL CONTRACT:
 - Never combine English prose and a mathematical expression in one equation field.
@@ -3169,6 +3185,72 @@ Return structured JSON only.
         },
     )
     return GuidedStepsRecovery.model_validate_json(interaction.output_text)
+
+
+
+def regenerate_question_variant(
+    *,
+    track_label: str,
+    source_question_text: str = "",
+    source_assets: list[UploadedAsset] | None = None,
+    variation_level: Literal["Similar", "Varied context", "Stretch"] = "Similar",
+    api_key: str | None = None,
+    model: str | None = None,
+    client=None,
+) -> str:
+    """Create one fresh same-topic variant from typed or uploaded source material."""
+    source_assets = source_assets or []
+    if not str(source_question_text or "").strip() and not source_assets:
+        raise GeminiTutorError(
+            "Provide a source question as text or an upload before regenerating it.",
+            category="input",
+        )
+
+    active_client = client or _make_client(api_key)
+    prompt = f"""
+You are a regenerative Singapore secondary Mathematics question generator for {track_label}.
+OFFICIAL SYLLABUS CONTEXT: {syllabus_context_for_track(track_label)}
+
+SOURCE QUESTION TEXT:
+{source_question_text.strip() or '[Question supplied by attachment]'}
+
+REGENERATIVE CONTRACT
+- Infer the source topic, mathematical skill, learning outcome, difficulty and representation.
+- Produce ONE new question that tests the SAME core mathematics.
+- NEVER copy or lightly paraphrase the source.
+- Change at least THREE meaningful surface features whenever possible:
+  numerical values, variable letters, dimensions, object names/context, ordering of information,
+  diagram measurements, sub-question structure, or representation.
+- Recalculate all dependent values so the new question is internally consistent and solvable.
+- Geometry/mensuration: regenerate dimensions and ensure any required diagram matches them.
+- Algebra: vary coefficients/constants and variable letters where appropriate.
+- Statistics: create a fresh coherent dataset/table/graph rather than changing labels only.
+- Trigonometry/graphs: vary parameters but preserve the intended concept.
+- Similarity/scale questions: use new lengths/areas/volumes with valid similarity relationships.
+- Do not reveal the answer.
+- Use MathIO-compatible inline LaTeX where mathematics appears.
+- Return ONLY the regenerated student question, no commentary.
+
+VARIATION LEVEL: {variation_level}
+- Similar: same mathematical structure, fresh surface values/variables/dimensions.
+- Varied context: same skill but meaningfully different story/context/representation.
+- Stretch: same skill plus one reasonable extra reasoning step.
+""".strip()
+
+    inputs: list[dict[str, str]] = [{"type": "text", "text": prompt}]
+    for i, asset in enumerate(source_assets, 1):
+        inputs.append({"type": "text", "text": f"Source question attachment {i}: {asset.name}"})
+        inputs.append(_encode_asset(asset))
+
+    try:
+        interaction = active_client.interactions.create(
+            model=get_model(model),
+            store=False,
+            input=inputs,
+        )
+        return str(interaction.output_text or "").strip()
+    except Exception as exc:
+        raise _translate_exception(exc) from exc
 
 
 def generate_guided_solution(
