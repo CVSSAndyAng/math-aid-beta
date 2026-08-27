@@ -5831,6 +5831,53 @@ def render_scene2d_png(scene, *, width: int = 960, height: int = 560, padding: i
     if y_max <= y_min or (y_max - y_min) > 1e6:
         y_min, y_max = -5, 5
 
+    # Geometry scenes should frame their actual construction, not trust broad
+    # or incorrect model-supplied bounds. This prevents triangle vertices and
+    # dimension labels from being clipped while removing large empty squares.
+    if not bool(getattr(scene, "show_axes", False)):
+        object_x: list[float] = []
+        object_y: list[float] = []
+
+        def include_xy(x, y):
+            try:
+                fx, fy = float(x), float(y)
+            except (TypeError, ValueError, OverflowError):
+                return
+            if math.isfinite(fx) and math.isfinite(fy):
+                object_x.append(fx)
+                object_y.append(fy)
+
+        for point in _scene_items(scene, "points"):
+            include_xy(getattr(point, "x", 0), getattr(point, "y", 0))
+        for polyline in _scene_items(scene, "polylines"):
+            for vertex in list(getattr(polyline, "points", []) or []):
+                if isinstance(vertex, (list, tuple)) and len(vertex) >= 2:
+                    include_xy(vertex[0], vertex[1])
+        for polygon in _scene_items(scene, "polygons"):
+            for vertex in list(getattr(polygon, "points", []) or []):
+                if isinstance(vertex, (list, tuple)) and len(vertex) >= 2:
+                    include_xy(vertex[0], vertex[1])
+        for circle in _scene_items(scene, "circles"):
+            try:
+                cx = float(getattr(circle, "center_x", 0))
+                cy = float(getattr(circle, "center_y", 0))
+                radius = abs(float(getattr(circle, "radius", 0)))
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if all(math.isfinite(v) for v in (cx, cy, radius)):
+                include_xy(cx - radius, cy - radius)
+                include_xy(cx + radius, cy + radius)
+
+        if object_x and object_y:
+            content_xmin, content_xmax = min(object_x), max(object_x)
+            content_ymin, content_ymax = min(object_y), max(object_y)
+            content_xspan = max(1.0, content_xmax - content_xmin)
+            content_yspan = max(1.0, content_ymax - content_ymin)
+            x_margin = max(0.45, 0.14 * content_xspan)
+            y_margin = max(0.45, 0.18 * content_yspan)
+            x_min, x_max = content_xmin - x_margin, content_xmax + x_margin
+            y_min, y_max = content_ymin - y_margin, content_ymax + y_margin
+
     plot_w = max(1, width - 2 * padding)
     plot_h = max(1, height - 2 * padding)
 
@@ -5864,7 +5911,8 @@ def render_scene2d_png(scene, *, width: int = 960, height: int = 560, padding: i
 
         frame = [padding, padding, width-padding, height-padding]
 
-    draw.rectangle(frame, outline=(205,205,205), width=1)
+    if bool(getattr(scene, "show_axes", False)):
+        draw.rectangle(frame, outline=(205,205,205), width=1)
 
     if bool(getattr(scene, "show_axes", False)):
         # Grid at sensible integer positions when range is moderate.
@@ -8523,7 +8571,11 @@ def build_setter_question_paper_docx(draft: ExamPaperDraft) -> bytes:
         p = doc.add_paragraph()
         p.paragraph_format.space_before = Pt(8)
         r = p.add_run(f"{q.question_number}. "); r.bold = True
-        append_word_mixed_math(p, _strip_visible_latex_text_commands(_strip_solid3d_block(_strip_generated_table_block(q.stem_text))))
+        clean_stem_prose = _question_prose_without_repeated_math(
+            _strip_solid3d_block(_strip_generated_table_block(q.stem_text)),
+            q.stem_equations,
+        )
+        append_word_mixed_math(p, clean_stem_prose)
         word_table_rendered = _add_question_table_to_word(doc, q)
         if not word_table_rendered and _looks_like_missing_frequency_table(q):
             warning = doc.add_paragraph()
@@ -8654,7 +8706,10 @@ def build_setter_question_paper_docx(draft: ExamPaperDraft) -> bytes:
             pp.paragraph_format.left_indent = Cm(0.5)
             if part.label:
                 rr = pp.add_run(part.label + " "); rr.bold = True
-            append_word_mixed_math(pp, part.prompt_text)
+            append_word_mixed_math(
+                pp,
+                _question_prose_without_repeated_math(part.prompt_text, part.equations),
+            )
             for eq in part.equations:
                 ep = doc.add_paragraph(); ep.paragraph_format.left_indent = Cm(1.0)
                 append_word_math(ep, eq)
@@ -8901,6 +8956,79 @@ def _strip_visible_latex_text_commands(text: str) -> str:
     value = re.sub(r'\\angle\s*([A-Z]{3})', r'∠\1', value)
     # Remove text{} wrapper while preserving its contents for prose.
     value = re.sub(r'\\text\s*\{\{?([^{}]+)\}?\}', r'\1', value)
+    # Repair common prose that a model has compressed inside a maths text wrapper.
+    fused_phrases = {
+        "Findthevalueof": "Find the value of ",
+        "Findtheexactvalueof": "Find the exact value of ",
+        "Calculatethevalueof": "Calculate the value of ",
+        "Calculatethe": "Calculate the ",
+        "Factorisefully": "Factorise fully ",
+        "Simplifythe": "Simplify the ",
+        "Giventhatthe": "Given that the ",
+    }
+    for fused, repaired in fused_phrases.items():
+        value = re.sub(re.escape(fused), repaired, value, flags=re.I)
+    return re.sub(r"[ \t]{2,}", " ", value).strip()
+
+
+def _question_prose_without_repeated_math(text: str, equations) -> str:
+    """Keep instructions as prose when the same maths has an equation field.
+
+    Generated JSON sometimes repeats an expression in prompt_text/stem_text and
+    in equations. Matrix/vector source is especially disruptive because it is
+    not valid prose. The equation field is the authoritative rendered copy.
+    """
+    value = _strip_visible_latex_text_commands(str(text or ""))
+    equation_list = [str(item or "").strip() for item in (equations or []) if str(item or "").strip()]
+    if not value or not equation_list:
+        return value
+
+    first_source_math = re.search(
+        r"\\(?:begin\s*\{(?:p|b|v)?matrix\}|overrightarrow|vec|pmatrix|bmatrix)",
+        value,
+        flags=re.I,
+    )
+    if first_source_math:
+        prefix = value[:first_source_math.start()].strip(" ,:;-")
+        if re.search(r"\b(?:are|is)\s+given\s+by$", prefix, flags=re.I):
+            prefix = re.sub(r"\b(?:are|is)\s+given\s+by$", "are given below", prefix, flags=re.I)
+        elif re.match(r"^Evaluate\b", prefix, flags=re.I):
+            prefix = "Evaluate the following matrix expression"
+        elif re.search(r"matrix\s+product$", prefix, flags=re.I):
+            prefix = "Calculate the following matrix product"
+        return prefix.rstrip(".") + "." if prefix else ""
+
+    # Remove an explicitly delimited duplicate when its normalized source is
+    # the same as one of the separate equation fields.
+    def canonical_math(source: str) -> str:
+        source = _strip_math_transport_delimiters(str(source or ""))
+        source = source.replace("−", "-").replace("×", r"\times")
+        source = re.sub(r"\\(?:left|right)", "", source)
+        source = re.sub(r"[{}\s]", "", source)
+        return source.lower()
+
+    equation_keys = {canonical_math(item) for item in equation_list}
+    math_segment = re.compile(r"(\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\)|\$\$[\s\S]*?\$\$|\$[^$\n]+?\$)")
+    value = math_segment.sub(
+        lambda match: "" if canonical_math(match.group(0)) in equation_keys else match.group(0),
+        value,
+    )
+
+    # Common command prompts put the repeated undelimited expression after a
+    # short instruction. Retain the instruction and let the equation field draw it.
+    command = re.match(
+        r"^\s*(Factorise\s+fully|Simplify|Expand|Solve|Evaluate|Calculate)\b",
+        value,
+        flags=re.I,
+    )
+    if command and any(canonical_math(eq) in canonical_math(value) for eq in equation_list):
+        instruction = command.group(1)
+        if instruction.lower() == "evaluate" and any("matrix" in eq.lower() for eq in equation_list):
+            instruction = "Evaluate the following matrix expression"
+        return instruction.rstrip(".") + "."
+
+    value = re.sub(r"\s+([,.;:])", r"\1", value)
+    value = re.sub(r"\s{2,}", " ", value).strip()
     return value
 
 
@@ -9187,10 +9315,11 @@ def render_setter_preview(draft: ExamPaperDraft) -> None:
             # Stem prose can itself contain mathematical expressions, so use the
             # MathIO-aware mixed renderer rather than st.write().
             if str(q.stem_text or "").strip():
-                preview_stem = _strip_visible_latex_text_commands(
+                preview_stem = _question_prose_without_repeated_math(
                     _normalise_unit_braces(
                         _strip_solid3d_block(_strip_generated_table_block(str(q.stem_text or "")))
-                    )
+                    ),
+                    q.stem_equations,
                 )
                 preview_stem = re.sub(r"(?<!\\)\bpi\b", r"\\pi", preview_stem, flags=re.IGNORECASE)
                 preview_stem = re.sub(r"(?<!\\)\btheta\b", r"\\theta", preview_stem, flags=re.IGNORECASE)
@@ -9331,7 +9460,11 @@ def render_setter_preview(draft: ExamPaperDraft) -> None:
                     st.markdown(f"#### {label} [{part.marks} marks]")
 
                 if str(part.prompt_text or "").strip():
-                    preview_prompt = re.sub(r"(?<!\\)\bpi\b", r"\\pi", part.prompt_text, flags=re.IGNORECASE)
+                    clean_prompt = _question_prose_without_repeated_math(
+                        part.prompt_text,
+                        part.equations,
+                    )
+                    preview_prompt = re.sub(r"(?<!\\)\bpi\b", r"\\pi", clean_prompt, flags=re.IGNORECASE)
                     preview_prompt = re.sub(r"(?<!\\)\btheta\b", r"\\theta", preview_prompt, flags=re.IGNORECASE)
                     render_mathio_mixed(preview_prompt)
 
