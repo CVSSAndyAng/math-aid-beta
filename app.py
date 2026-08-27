@@ -2930,10 +2930,10 @@ def targeted_practice_input(
     canvas_asset = handwriting_pad(key=f"{key_base}_handwriting")
     if canvas_asset is None:
         st.info("If you are using the handwriting pad, finish the page and tap **Save handwriting** before pressing the marking button.")
-    camera_file = st.camera_input(
+    camera_file = rear_camera_input(
         "Take a photo of handwritten working",
         key=f"{key_base}_camera",
-        help="Allow camera access in Safari/Chrome when prompted.",
+        help="The outward-facing camera is selected first. Allow camera access in Safari/Chrome when prompted.",
     )
     upload_files = st.file_uploader(
         "Or upload handwritten page(s)",
@@ -11436,6 +11436,102 @@ def _student_notes():
 
 import streamlit.components.v1 as st_components_v1  # local guard for geometry-board component
 
+_REAR_CAMERA_HTML = r'''<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<style>
+*{box-sizing:border-box}html,body{margin:0;font-family:Arial,sans-serif;background:transparent;color:#252631}
+.camera{border:1px solid #d7dbe5;border-radius:12px;background:#f7f8fb;padding:10px;overflow:hidden}
+.stage{position:relative;width:100%;aspect-ratio:4/3;max-height:390px;background:#171923;border-radius:9px;overflow:hidden;display:flex;align-items:center;justify-content:center}
+video,img{width:100%;height:100%;object-fit:contain}img{display:none}.badge{position:absolute;left:9px;top:9px;background:rgba(0,0,0,.68);color:#fff;padding:5px 8px;border-radius:7px;font-size:12px}
+.message{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;color:white;padding:24px;line-height:1.4}
+.actions{display:flex;gap:8px;margin-top:9px;flex-wrap:wrap}button{border:1px solid #c8cedb;border-radius:8px;background:white;padding:9px 13px;font-weight:600;cursor:pointer}
+button.primary{background:#5b5de2;border-color:#5b5de2;color:white}button:disabled{opacity:.55;cursor:not-allowed}.hint{font-size:12px;color:#626a78;margin-top:7px}
+</style></head><body>
+<div class="camera"><div class="stage"><video id="video" autoplay muted playsinline></video><img id="preview" alt="Captured photo"><div class="badge" id="badge">Rear camera</div><div class="message" id="message">Tap “Open rear camera” to begin.</div></div>
+<div class="actions"><button class="primary" id="take">Open rear camera</button><button id="retake" style="display:none">Retake</button><button id="switch" style="display:none">Switch camera</button></div>
+<div class="hint">The outward-facing camera is selected first. Allow camera access when your browser asks.</div></div>
+<canvas id="canvas" hidden></canvas>
+<script>
+const Streamlit={
+ setComponentReady(){parent.postMessage({isStreamlitMessage:true,type:'streamlit:componentReady',apiVersion:1},'*')},
+ setFrameHeight(height){parent.postMessage({isStreamlitMessage:true,type:'streamlit:setFrameHeight',height},'*')},
+ setComponentValue(value){parent.postMessage({isStreamlitMessage:true,type:'streamlit:setComponentValue',value},'*')}
+};
+const video=document.getElementById('video'),preview=document.getElementById('preview'),canvas=document.getElementById('canvas');
+const message=document.getElementById('message'),take=document.getElementById('take'),retake=document.getElementById('retake'),switchBtn=document.getElementById('switch'),badge=document.getElementById('badge');
+let stream=null,devices=[],deviceIndex=0;
+function stop(){if(stream)stream.getTracks().forEach(t=>t.stop());stream=null}
+async function cameras(){
+ try{const all=await navigator.mediaDevices.enumerateDevices();devices=all.filter(d=>d.kind==='videoinput');
+   const rear=devices.findIndex(d=>/back|rear|environment|world/i.test(d.label));deviceIndex=rear>=0?rear:Math.max(0,devices.length-1);switchBtn.style.display=devices.length>1?'inline-block':'none';
+ }catch(e){devices=[]}
+}
+async function start(useDevice=false){
+ stop();message.style.display='flex';message.textContent='Starting outward-facing camera…';take.disabled=true;take.style.display='inline-block';preview.style.display='none';video.style.display='block';retake.style.display='none';
+ try{
+   let constraints={audio:false,video:{facingMode:{ideal:'environment'},width:{ideal:1920},height:{ideal:1080}}};
+   if(useDevice&&devices[deviceIndex])constraints.video={deviceId:{exact:devices[deviceIndex].deviceId},width:{ideal:1920},height:{ideal:1080}};
+   stream=await navigator.mediaDevices.getUserMedia(constraints);video.srcObject=stream;await video.play();await cameras();
+   const settings=stream.getVideoTracks()[0]?.getSettings?.()||{};const selected=devices.find(d=>d.deviceId===settings.deviceId);badge.textContent=selected?.label||((settings.facingMode==='user')?'Front camera':'Rear camera');
+   message.style.display='none';take.disabled=false;take.textContent='Take photo';
+ }catch(err){
+   try{stream=await navigator.mediaDevices.getUserMedia({audio:false,video:true});video.srcObject=stream;await video.play();await cameras();message.style.display='none';take.disabled=false;take.textContent='Take photo';badge.textContent='Available camera';}
+   catch(second){message.textContent='Camera unavailable. Check browser permission, or use the upload option below.';badge.textContent='Camera';}
+ }
+ Streamlit.setFrameHeight(document.documentElement.scrollHeight+4);
+}
+take.addEventListener('click',async()=>{
+ if(!stream){await start(false);return}
+ const w=video.videoWidth||1280,h=video.videoHeight||960;canvas.width=w;canvas.height=h;canvas.getContext('2d').drawImage(video,0,0,w,h);
+ const dataUrl=canvas.toDataURL('image/jpeg',.92);preview.src=dataUrl;preview.style.display='block';video.style.display='none';take.style.display='none';retake.style.display='inline-block';
+ Streamlit.setComponentValue({kind:'rear_camera_photo',data_url:dataUrl,name:'camera-photo.jpg',captured_at:Date.now()});
+});
+retake.addEventListener('click',()=>{preview.style.display='none';video.style.display='block';take.style.display='inline-block';retake.style.display='none'});
+switchBtn.addEventListener('click',async()=>{if(!devices.length)return;deviceIndex=(deviceIndex+1)%devices.length;await start(true)});
+window.addEventListener('pagehide',stop);window.addEventListener('message',e=>{if(e.data?.type==='streamlit:render')Streamlit.setFrameHeight(document.documentElement.scrollHeight+4)});
+Streamlit.setComponentReady();Streamlit.setFrameHeight(500);
+</script></body></html>'''
+
+
+def _prepare_rear_camera_frontend() -> Path:
+    """Materialise the rear-camera component in Streamlit's writable temp area."""
+    runtime_dir = Path(tempfile.gettempdir()) / "math_buddy_rear_camera_component_v1"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    index_file = runtime_dir / "index.html"
+    try:
+        existing = index_file.read_text(encoding="utf-8") if index_file.exists() else ""
+    except Exception:
+        existing = ""
+    if existing != _REAR_CAMERA_HTML:
+        index_file.write_text(_REAR_CAMERA_HTML, encoding="utf-8")
+    return runtime_dir
+
+
+_rear_camera_component = st_components_v1.declare_component(
+    "math_buddy_rear_camera_v1",
+    path=str(_prepare_rear_camera_frontend()),
+)
+
+
+def rear_camera_input(label: str, *, key: str, help: str | None = None):
+    """Capture a JPEG with the environment-facing camera and return a file-like object."""
+    st.markdown(f"**{label}**")
+    if help:
+        st.caption(help)
+    result = _rear_camera_component(key=key, default=None)
+    if not isinstance(result, dict) or result.get("kind") != "rear_camera_photo":
+        return None
+    data_url = str(result.get("data_url") or "")
+    if not data_url.startswith("data:image/jpeg;base64,"):
+        return None
+    try:
+        photo = BytesIO(base64.b64decode(data_url.split(",", 1)[1]))
+    except Exception:
+        return None
+    photo.name = str(result.get("name") or "camera-photo.jpg")
+    photo.type = "image/jpeg"
+    return photo
+
 # Embedded frontend: no separately deployed component directory is required.
 _GEOMETRY_BOARD_SOURCE = Path(__file__).resolve().parent / "geometry_board_component" / "index.html"
 _GEOMETRY_BOARD_HTML = _GEOMETRY_BOARD_SOURCE.read_text(encoding="utf-8")
@@ -12041,9 +12137,10 @@ if role_mode == "For Student":
             )
 
             st.markdown("#### Or add a picture")
-            student_ask_camera = st.camera_input(
+            student_ask_camera = rear_camera_input(
                 "Take a picture of the question",
                 key="student_ask_camera",
+                help="The outward-facing camera is selected first.",
             )
             student_ask_uploads = st.file_uploader(
                 "Upload question image / screenshot / PDF",
@@ -12271,9 +12368,10 @@ if role_mode == "For Student":
 
         st.markdown("#### Add a picture")
         picture_version = _student_picture_input_version()
-        photo = st.camera_input(
+        photo = rear_camera_input(
             "Take a picture",
             key=f"student_camera_{picture_version}",
+            help="The outward-facing camera is selected first.",
         )
         uploaded = st.file_uploader(
             "Or upload a picture / screenshot",
