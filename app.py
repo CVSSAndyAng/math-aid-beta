@@ -5815,13 +5815,20 @@ def render_scene2d_png(scene, *, width: int = 960, height: int = 560, padding: i
     draw = ImageDraw.Draw(img)
     font = _diagram_label_font_for_canvas(width)
 
-    x_min = float(getattr(scene, "x_min", -5) or -5)
-    x_max = float(getattr(scene, "x_max", 5) or 5)
-    y_min = float(getattr(scene, "y_min", -5) or -5)
-    y_max = float(getattr(scene, "y_max", 5) or 5)
-    if x_max <= x_min:
+    def finite_bound(value, fallback):
+        try:
+            number = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return float(fallback)
+        return number if math.isfinite(number) else float(fallback)
+
+    x_min = finite_bound(getattr(scene, "x_min", -5), -5)
+    x_max = finite_bound(getattr(scene, "x_max", 5), 5)
+    y_min = finite_bound(getattr(scene, "y_min", -5), -5)
+    y_max = finite_bound(getattr(scene, "y_max", 5), 5)
+    if x_max <= x_min or (x_max - x_min) > 1e6:
         x_min, x_max = -5, 5
-    if y_max <= y_min:
+    if y_max <= y_min or (y_max - y_min) > 1e6:
         y_min, y_max = -5, 5
 
     plot_w = max(1, width - 2 * padding)
@@ -5885,7 +5892,12 @@ def render_scene2d_png(scene, *, width: int = 960, height: int = 560, padding: i
         coords=[]
         for v in samples:
             if isinstance(v,(list,tuple)) and len(v)>=2:
-                coords.append(xy(v[0],v[1]))
+                try:
+                    vx, vy = float(v[0]), float(v[1])
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if math.isfinite(vx) and math.isfinite(vy):
+                    coords.append(xy(vx,vy))
         if len(coords)>=2:
             draw.line(coords, fill=(35,35,35), width=3)
             label=str(getattr(poly,"label","") or "")
@@ -6075,14 +6087,23 @@ def _question_graph_spec(question) -> dict | None:
     is_trig = any(token in text for token in ("sin", "cos", "tan", "trigonometric"))
 
     # Prefer question-specified scene bounds. Trig defaults show multiple periods.
-    if scene is not None:
-        xmin = float(getattr(scene, "x_min", -6.5 if is_trig else -5) or (-6.5 if is_trig else -5))
-        xmax = float(getattr(scene, "x_max", 6.5 if is_trig else 5) or (6.5 if is_trig else 5))
-    else:
-        xmin, xmax = ((-2 * math.pi, 2 * math.pi) if is_trig else (-5.0, 5.0))
+    default_xmin, default_xmax = ((-2 * math.pi, 2 * math.pi) if is_trig else (-5.0, 5.0))
 
-    if xmax <= xmin:
-        xmin, xmax = (-2 * math.pi, 2 * math.pi) if is_trig else (-5.0, 5.0)
+    def finite_graph_bound(value, fallback):
+        try:
+            number = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return float(fallback)
+        return number if math.isfinite(number) else float(fallback)
+
+    if scene is not None:
+        xmin = finite_graph_bound(getattr(scene, "x_min", default_xmin), default_xmin)
+        xmax = finite_graph_bound(getattr(scene, "x_max", default_xmax), default_xmax)
+    else:
+        xmin, xmax = default_xmin, default_xmax
+
+    if xmax <= xmin or (xmax - xmin) > 1e6:
+        xmin, xmax = default_xmin, default_xmax
 
     # Sample locally only to choose a useful y-view; GeoGebra draws the actual curve.
     finite = []
@@ -6111,9 +6132,9 @@ def _question_graph_spec(question) -> dict | None:
     else:
         calc_ymin, calc_ymax = -5.0, 5.0
 
-    ymin = float(raw_ymin) if raw_ymin is not None else float(calc_ymin)
-    ymax = float(raw_ymax) if raw_ymax is not None else float(calc_ymax)
-    if ymax <= ymin:
+    ymin = finite_graph_bound(raw_ymin, calc_ymin)
+    ymax = finite_graph_bound(raw_ymax, calc_ymax)
+    if ymax <= ymin or (ymax - ymin) > 1e6:
         ymin, ymax = float(calc_ymin), float(calc_ymax)
 
     commands = [f"f{i}(x)={expr}" for i, expr in enumerate(expressions, 1)]
