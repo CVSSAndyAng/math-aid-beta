@@ -2002,6 +2002,42 @@ def _setter_scene_has_segment(scene, u: str, v: str) -> bool:
     return False
 
 
+def _setter_plot_ready_function_count(question) -> int:
+    """Count explicit numerical y=f(x) definitions the app can draw locally."""
+    sources = list(getattr(question, "graph_equations", []) or [])
+    sources.extend(str(x) for x in (getattr(question, "stem_equations", []) or []))
+    sources.append(str(getattr(question, "stem_text", "") or ""))
+    for part in (getattr(question, "parts", []) or []):
+        sources.append(str(getattr(part, "prompt_text", "") or ""))
+        sources.extend(str(x) for x in (getattr(part, "equations", []) or []))
+
+    count = 0
+    seen: set[str] = set()
+    allowed_names = {"x", "pi", "sin", "cos", "tan", "sqrt", "log", "ln", "exp"}
+    for source in sources:
+        starts = list(re.finditer(r"\by\s*=\s*", source, flags=re.I))
+        for index, match in enumerate(starts):
+            end = starts[index + 1].start() if index + 1 < len(starts) else len(source)
+            expression = source[match.end():end]
+            expression = re.split(r"[.;\n]", expression, maxsplit=1)[0]
+            expression = re.split(
+                r"\s+(?:and|where|for|with|intersects?|meets?|at|the\s+(?:line|curve|graph))\s+",
+                expression,
+                maxsplit=1,
+                flags=re.I,
+            )[0].strip()
+            if not expression:
+                continue
+            names = {name.lower() for name in re.findall(r"[A-Za-z]+", expression)}
+            if names - allowed_names:
+                continue
+            key = re.sub(r"\s+", "", expression).lower()
+            if key not in seen:
+                seen.add(key)
+                count += 1
+    return count
+
+
 def audit_setter_diagrams(draft: ExamPaperDraft) -> list[str]:
     """Reject obviously mismatched generated diagrams before the teacher sees them."""
     issues=[]
@@ -2013,10 +2049,15 @@ def audit_setter_diagrams(draft: ExamPaperDraft) -> list[str]:
         )
         lower=text.lower()
         scene=q.diagram_scene_2d
+        plot_ready_count = _setter_plot_ready_function_count(q)
+        deterministic_intersection_graph = bool(
+            plot_ready_count >= 2 and re.search(r"\b(intersects?|meets?)\b", text, re.I)
+        )
 
-        # Any graph question with y= must at least have a 2D axes scene.
+        # Explicit numerical functions are drawn and labelled by the app's
+        # deterministic renderer, so a model-supplied axes scene is optional.
         if re.search(r"\by\s*=",text,re.I):
-            if scene is None or not bool(getattr(scene,"show_axes",False)):
+            if plot_ready_count == 0 and (scene is None or not bool(getattr(scene,"show_axes",False))):
                 issues.append(f"Question {q.question_number}: graph/function question has no axes scene")
 
         if "circle" in lower:
@@ -2039,7 +2080,10 @@ def audit_setter_diagrams(draft: ExamPaperDraft) -> list[str]:
                     named.update(chord)
                     if not _setter_scene_has_segment(scene,chord[0],chord[1]):
                         issues.append(f"Question {q.question_number}: chord {chord} missing from diagram")
-        missing=sorted(x for x in named if x not in labels)
+        missing=sorted(
+            x for x in named
+            if x not in labels and not deterministic_intersection_graph
+        )
         if missing:
             issues.append(f"Question {q.question_number}: diagram missing point(s) {', '.join(missing)}")
 

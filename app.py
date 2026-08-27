@@ -5999,11 +5999,20 @@ def _extract_y_functions(question) -> list[tuple[str, object]]:
     sources.extend(_question_equation_sources(question))
 
     for source in sources:
-        # split generously on punctuation but stop before prose clauses
-        for m in re.finditer(r"\by\s*=\s*([^.;\n]+)", source, flags=re.I):
-            expr = m.group(1).strip()
+        # Extract each y= occurrence separately. A single sentence commonly
+        # contains both a line and a curve (for example y=2x+3 and y=x^2).
+        starts = list(re.finditer(r"\by\s*=\s*", source, flags=re.I))
+        for index, m in enumerate(starts):
+            end = starts[index + 1].start() if index + 1 < len(starts) else len(source)
+            expr = source[m.end():end]
+            expr = re.split(r"[.;\n]", expr, maxsplit=1)[0].strip()
             # trim common prose that follows a displayed equation
-            expr = re.split(r"\s+(?:and|where|for|with|intersect|meets|at)\s+", expr, maxsplit=1, flags=re.I)[0].strip()
+            expr = re.split(
+                r"\s+(?:and|where|for|with|intersects?|meets?|at|the\s+(?:line|curve|graph))\s+",
+                expr,
+                maxsplit=1,
+                flags=re.I,
+            )[0].strip()
             key = re.sub(r"\s+","",expr)
             if not expr or key in seen:
                 continue
@@ -6018,6 +6027,78 @@ def _extract_y_functions(question) -> list[tuple[str, object]]:
                 seen.add(key)
                 found.append((expr, fn))
     return found
+
+
+def _question_intersection_labels(question) -> list[str]:
+    """Return printed point names for a two-curve intersection question."""
+    text = " ".join(_question_equation_sources(question))
+    match = re.search(
+        r"\bpoints?\s+([A-Z])\s*(?:,|and|&)\s*([A-Z])\b",
+        text,
+        flags=re.I,
+    )
+    return [match.group(1).upper(), match.group(2).upper()] if match else []
+
+
+def _function_intersections(functions, xmin: float, xmax: float) -> list[tuple[float, float]]:
+    """Find reliable pairwise intersections for labels in deterministic graphs."""
+    roots: list[tuple[float, float]] = []
+    if len(functions) < 2 or not math.isfinite(xmin) or not math.isfinite(xmax) or xmax <= xmin:
+        return roots
+
+    def add_root(x, left_fn, right_fn):
+        try:
+            y1, y2 = float(left_fn(x)), float(right_fn(x))
+        except Exception:
+            return
+        tolerance = 1e-5 * max(1.0, abs(y1), abs(y2))
+        if not all(math.isfinite(v) for v in (x, y1, y2)) or abs(y1 - y2) > tolerance:
+            return
+        if not (xmin - 1e-8 <= x <= xmax + 1e-8):
+            return
+        merge_distance = max(1e-5, (xmax - xmin) / 5000)
+        if any(abs(x - old_x) <= merge_distance for old_x, _ in roots):
+            return
+        roots.append((x, (y1 + y2) / 2))
+
+    sample_count = 1600
+    for left_index in range(len(functions)):
+        for right_index in range(left_index + 1, len(functions)):
+            left_fn, right_fn = functions[left_index][1], functions[right_index][1]
+            previous = None
+            for sample_index in range(sample_count + 1):
+                x = xmin + (xmax - xmin) * sample_index / sample_count
+                try:
+                    delta = float(left_fn(x)) - float(right_fn(x))
+                except Exception:
+                    previous = None
+                    continue
+                if not math.isfinite(delta) or abs(delta) > 1e6:
+                    previous = None
+                    continue
+                if abs(delta) <= 1e-8:
+                    add_root(x, left_fn, right_fn)
+                if previous is not None and previous[1] * delta < 0:
+                    lo, hi = previous[0], x
+                    dlo = previous[1]
+                    for _ in range(48):
+                        mid = (lo + hi) / 2
+                        try:
+                            dmid = float(left_fn(mid)) - float(right_fn(mid))
+                        except Exception:
+                            break
+                        if not math.isfinite(dmid):
+                            break
+                        if abs(dmid) <= 1e-11:
+                            lo = hi = mid
+                            break
+                        if dlo * dmid <= 0:
+                            hi = mid
+                        else:
+                            lo, dlo = mid, dmid
+                    add_root((lo + hi) / 2, left_fn, right_fn)
+                previous = (x, delta)
+    return sorted(roots, key=lambda item: item[0])
 
 
 def _geogebra_safe_expression(expr: str) -> str | None:
@@ -6124,7 +6205,10 @@ def _question_graph_spec(question) -> dict | None:
         raw_ymin = raw_ymax = None
 
     if finite:
-        lo, hi = min(finite), max(finite)
+        ordered = sorted(finite)
+        # Trim rare asymptote/outlier samples so ordinary curve detail remains visible.
+        lo = ordered[int(0.02 * (len(ordered) - 1))]
+        hi = ordered[int(0.98 * (len(ordered) - 1))]
         span = max(1.0, hi - lo)
         pad = max(1.0, 0.12 * span)
         calc_ymin = math.floor(lo - pad)
@@ -6134,8 +6218,13 @@ def _question_graph_spec(question) -> dict | None:
 
     ymin = finite_graph_bound(raw_ymin, calc_ymin)
     ymax = finite_graph_bound(raw_ymax, calc_ymax)
-    if ymax <= ymin or (ymax - ymin) > 1e6:
+    if ymax <= ymin or (ymax - ymin) > 1e4:
         ymin, ymax = float(calc_ymin), float(calc_ymax)
+    else:
+        # Do not let an undersized generated scene crop a valid curve or one of
+        # the named intersections that the question asks students to use.
+        ymin = min(ymin, float(calc_ymin))
+        ymax = max(ymax, float(calc_ymax))
 
     commands = [f"f{i}(x)={expr}" for i, expr in enumerate(expressions, 1)]
     signature_source = "|".join(commands) + f"|{xmin:.6g}|{xmax:.6g}|{ymin:.6g}|{ymax:.6g}"
@@ -6937,6 +7026,26 @@ def build_function_graph_scene(question):
 
     # Replace any placeholder/model polylines with the authoritative curves.
     scene.polylines = all_chunks
+    labels = _question_intersection_labels(question)
+    intersections = _function_intersections(functions, xmin, xmax)
+    if labels and intersections:
+        existing_points = list(getattr(scene, "points", []) or [])
+        # Named intersections are authoritative construction points. Remove
+        # stale model-supplied points with the same labels before inserting them.
+        existing_points = [
+            point for point in existing_points
+            if str(getattr(point, "label", "") or "").upper() not in set(labels)
+        ]
+        for point_index, ((x, y), label) in enumerate(zip(intersections, labels), 1):
+            existing_points.append(
+                SimpleNamespace(
+                    id=f"function_intersection_{point_index}",
+                    x=x,
+                    y=y,
+                    label=label,
+                )
+            )
+        scene.points = existing_points
     return scene
 
 
@@ -9919,6 +10028,10 @@ if role_mode == "For Teacher":
                 st.session_state.setter_error = ""
                 st.session_state.setter_draft = None
                 st.session_state.setter_geogebra_graphs = {}
+                st.session_state.pop("setter_question_docx_signature", None)
+                st.session_state.pop("setter_question_docx_bytes", None)
+                st.session_state.pop("setter_scheme_docx_signature", None)
+                st.session_state.pop("setter_scheme_docx_bytes", None)
                 try:
                     spinner_text = (
                         "Reading the optional reference format, setting questions and auditing mark totals..."
@@ -10024,7 +10137,26 @@ if role_mode == "For Teacher":
                             "directly from its exact equation by Math Advisor's deterministic renderer."
                         )
 
-                question_docx = build_setter_question_paper_docx(setter_draft)
+                # Word rendering (equations, diagrams and images) is substantial.
+                # Reuse it across ordinary Streamlit reruns until the draft or a
+                # captured graph actually changes.
+                try:
+                    draft_payload = setter_draft.model_dump_json()
+                except Exception:
+                    draft_payload = str(setter_draft)
+                graph_fingerprint = []
+                for graph_key, graph_bytes in sorted(_geogebra_graph_store().items()):
+                    if isinstance(graph_bytes, (bytes, bytearray)):
+                        graph_fingerprint.append(
+                            (graph_key, hashlib.sha256(bytes(graph_bytes)).hexdigest()[:16])
+                        )
+                question_docx_signature = hashlib.sha256(
+                    ("word-v2|" + draft_payload + repr(graph_fingerprint)).encode("utf-8")
+                ).hexdigest()
+                if st.session_state.get("setter_question_docx_signature") != question_docx_signature:
+                    st.session_state.setter_question_docx_bytes = build_setter_question_paper_docx(setter_draft)
+                    st.session_state.setter_question_docx_signature = question_docx_signature
+                question_docx = st.session_state.setter_question_docx_bytes
                 downloads = st.columns(2 if include_scheme else 1)
                 downloads[0].download_button(
                     "Download question paper (.docx)",
@@ -10034,7 +10166,13 @@ if role_mode == "For Teacher":
                     use_container_width=True,
                 )
                 if include_scheme:
-                    scheme_docx = build_setter_marking_scheme_docx(setter_draft)
+                    scheme_docx_signature = hashlib.sha256(
+                        ("scheme-v2|" + draft_payload).encode("utf-8")
+                    ).hexdigest()
+                    if st.session_state.get("setter_scheme_docx_signature") != scheme_docx_signature:
+                        st.session_state.setter_scheme_docx_bytes = build_setter_marking_scheme_docx(setter_draft)
+                        st.session_state.setter_scheme_docx_signature = scheme_docx_signature
+                    scheme_docx = st.session_state.setter_scheme_docx_bytes
                     downloads[1].download_button(
                         "Download marking scheme (.docx)",
                         data=scheme_docx,
@@ -11441,7 +11579,7 @@ _REAR_CAMERA_HTML = r'''<!doctype html>
 <style>
 *{box-sizing:border-box}html,body{margin:0;font-family:Arial,sans-serif;background:transparent;color:#252631}
 .camera{border:1px solid #d7dbe5;border-radius:12px;background:#f7f8fb;padding:10px;overflow:hidden}
-.stage{position:relative;width:100%;aspect-ratio:4/3;max-height:390px;background:#171923;border-radius:9px;overflow:hidden;display:flex;align-items:center;justify-content:center}
+.stage{position:relative;width:100%;aspect-ratio:4/3;max-height:390px;background:#171923;border-radius:9px;overflow:hidden;display:none;align-items:center;justify-content:center}
 video,img{width:100%;height:100%;object-fit:contain}img{display:none}.badge{position:absolute;left:9px;top:9px;background:rgba(0,0,0,.68);color:#fff;padding:5px 8px;border-radius:7px;font-size:12px}
 .message{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;color:white;padding:24px;line-height:1.4}
 .actions{display:flex;gap:8px;margin-top:9px;flex-wrap:wrap}button{border:1px solid #c8cedb;border-radius:8px;background:white;padding:9px 13px;font-weight:600;cursor:pointer}
@@ -11467,7 +11605,7 @@ async function cameras(){
  }catch(e){devices=[]}
 }
 async function start(useDevice=false){
- stop();message.style.display='flex';message.textContent='Starting outward-facing camera…';take.disabled=true;take.style.display='inline-block';preview.style.display='none';video.style.display='block';retake.style.display='none';
+ stop();document.querySelector('.stage').style.display='flex';message.style.display='flex';message.textContent='Starting outward-facing camera…';take.disabled=true;take.style.display='inline-block';preview.style.display='none';video.style.display='block';retake.style.display='none';
  try{
    let constraints={audio:false,video:{facingMode:{ideal:'environment'},width:{ideal:1920},height:{ideal:1080}}};
    if(useDevice&&devices[deviceIndex])constraints.video={deviceId:{exact:devices[deviceIndex].deviceId},width:{ideal:1920},height:{ideal:1080}};
@@ -11489,13 +11627,13 @@ take.addEventListener('click',async()=>{
 retake.addEventListener('click',()=>{preview.style.display='none';video.style.display='block';take.style.display='inline-block';retake.style.display='none'});
 switchBtn.addEventListener('click',async()=>{if(!devices.length)return;deviceIndex=(deviceIndex+1)%devices.length;await start(true)});
 window.addEventListener('pagehide',stop);window.addEventListener('message',e=>{if(e.data?.type==='streamlit:render')Streamlit.setFrameHeight(document.documentElement.scrollHeight+4)});
-Streamlit.setComponentReady();Streamlit.setFrameHeight(500);
+Streamlit.setComponentReady();Streamlit.setFrameHeight(95);
 </script></body></html>'''
 
 
 def _prepare_rear_camera_frontend() -> Path:
     """Materialise the rear-camera component in Streamlit's writable temp area."""
-    runtime_dir = Path(tempfile.gettempdir()) / "math_buddy_rear_camera_component_v1"
+    runtime_dir = Path(tempfile.gettempdir()) / "math_buddy_rear_camera_component_v2"
     runtime_dir.mkdir(parents=True, exist_ok=True)
     index_file = runtime_dir / "index.html"
     try:
@@ -11508,7 +11646,7 @@ def _prepare_rear_camera_frontend() -> Path:
 
 
 _rear_camera_component = st_components_v1.declare_component(
-    "math_buddy_rear_camera_v1",
+    "math_buddy_rear_camera_v2",
     path=str(_prepare_rear_camera_frontend()),
 )
 
