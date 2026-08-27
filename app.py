@@ -665,6 +665,13 @@ def _normalize_generated_math_text(value: str) -> str:
     if not text:
         return ""
 
+    # Repair transport damage and commands that are harmless inside LaTeX but
+    # distracting when a generated sentence has not supplied delimiters.
+    text = text.replace("\x0crac", r"\frac").replace("\x0c", r"\f")
+    text = re.sub(r"\\(?:left|right)\b", "", text)
+    text = re.sub(r"\\lg\b", r"\\log", text)
+    text = re.sub(r"\\\s+(?=\\(?:theta|pi|sin|cos|tan|log|frac|int)\b)", "", text)
+
     # Generated questions occasionally put prose inside one pair of maths
     # delimiters, e.g. \(y=... and the line y=8\). Split this into two
     # equations so MathIO never typesets ordinary words as variables.
@@ -694,11 +701,11 @@ def _normalize_generated_math_text(value: str) -> str:
     # Repair common text-maths leakage.
     text = re.sub(r"(\d+(?:\.\d+)?)\s*degrees\b", r"\1^{\\circ}", text, flags=re.IGNORECASE)
     text = re.sub(r"\bangle\s+([A-Z]{2,4})\b", r"\\angle \1", text)
-    text = re.sub(r"\btheta\b", r"\\theta", text, flags=re.IGNORECASE)
+    text = re.sub(r"(?<!\\)\btheta\b", r"\\theta", text, flags=re.IGNORECASE)
     text = re.sub(r"(?<!\\)\barctan\s*\(", r"\\arctan(", text, flags=re.IGNORECASE)
     text = re.sub(r"(?<!\\)\barcsin\s*\(", r"\\arcsin(", text, flags=re.IGNORECASE)
     text = re.sub(r"(?<!\\)\barccos\s*\(", r"\\arccos(", text, flags=re.IGNORECASE)
-    text = re.sub(r"\bpi\b", r"\\pi", text, flags=re.IGNORECASE)
+    text = re.sub(r"(?<!\\)\bpi\b", r"\\pi", text, flags=re.IGNORECASE)
     text = re.sub(r"\{(cm|mm|km|kg|m|g|s|h|ml|l)\}", r"\1", text, flags=re.IGNORECASE)
     text = re.sub(r"(?<=\d)(cm|mm|km|kg|m|g|s|h|ml|l)\b", r" \1", text, flags=re.IGNORECASE)
 
@@ -723,11 +730,19 @@ _AUTO_MATHIO_FRAGMENT_RE = re.compile(
         |
         (?<![\w\\])(?:-?\d+(?:\.\d+)?[A-Za-z]|[A-Za-z])(?:\^\{?[-+]?\d+\}?)?(?:\s*[+\-]\s*(?:-?\d+(?:\.\d+)?[A-Za-z]|[A-Za-z])(?:\^\{?[-+]?\d+\}?)?)+(?!\w)
         |
-        \\frac\{[^{}\n]+\}\{[^{}\n]+\}
+        \\frac\{(?:[^{}\n]|\{[^{}\n]*\})+\}\{(?:[^{}\n]|\{[^{}\n]*\})+\}
         |
         \\sqrt\{[^{}\n]+\}
         |
         \\(?:sin|cos|tan|log|ln)\s*(?:\\left)?\([^)\n]+(?:\\right)?\)
+        |
+        \\(?:sin|cos|tan)(?:\^\{?\d+\}?)?\s*\\theta
+        |
+        \\(?:log|ln)\s*(?:\d+(?:\.\d+)?|[A-Za-z])
+        |
+        \\int(?:_\{[^{}\n]+\})?(?:\^\{[^{}\n]+\})?\s*[^.;\n]+?\s*d[a-zA-Z]
+        |
+        \\(?:le|leq|ge|geq|neq|pm)\b
         |
         \\(?:pi|theta|alpha|beta|gamma)\b
         |
@@ -750,25 +765,33 @@ def _auto_mathio_markup(value: str) -> str:
     if not text:
         return ""
 
-    if _MATHIO_MIXED_PATTERN.search(text):
-        return text
+    def mark_plain(segment: str) -> str:
+        pieces: list[str] = []
+        cursor = 0
+        for match in _AUTO_MATHIO_FRAGMENT_RE.finditer(segment):
+            if match.start() > cursor:
+                pieces.append(segment[cursor:match.start()])
+            fragment = match.group(0).strip()
+            fragment = re.sub(r"\bsin\s*\(", r"\\sin(", fragment)
+            fragment = re.sub(r"\bcos\s*\(", r"\\cos(", fragment)
+            fragment = re.sub(r"\btan\s*\(", r"\\tan(", fragment)
+            pieces.append(r"\(" + fragment + r"\)")
+            cursor = match.end()
+        if cursor < len(segment):
+            pieces.append(segment[cursor:])
+        return "".join(pieces) if pieces else segment
 
-    pieces: list[str] = []
+    # Process every prose segment, not only strings with no existing delimiters.
+    # A generated sentence often contains one correct \(...\) fragment followed
+    # by an undelimited fraction, trig command or integral.
+    output: list[str] = []
     cursor = 0
-    for match in _AUTO_MATHIO_FRAGMENT_RE.finditer(text):
-        if match.start() > cursor:
-            pieces.append(text[cursor:match.start()])
-        fragment = match.group(0).strip()
-        fragment = re.sub(r"\bsin\s*\(", r"\\sin(", fragment)
-        fragment = re.sub(r"\bcos\s*\(", r"\\cos(", fragment)
-        fragment = re.sub(r"\btan\s*\(", r"\\tan(", fragment)
-        pieces.append(r"\(" + fragment + r"\)")
-        cursor = match.end()
-
-    if cursor < len(text):
-        pieces.append(text[cursor:])
-
-    return "".join(pieces) if pieces else text
+    for protected in _MATHIO_MIXED_PATTERN.finditer(text):
+        output.append(mark_plain(text[cursor:protected.start()]))
+        output.append(protected.group(0))
+        cursor = protected.end()
+    output.append(mark_plain(text[cursor:]))
+    return "".join(output)
 
 
 def _latex_leak_detected(value: str) -> bool:
@@ -6001,9 +6024,44 @@ def render_scene2d_png(scene, *, width: int = 960, height: int = 560, padding: i
 
 
 
+def _linearize_latex_fractions(value: str) -> str:
+    """Convert balanced LaTeX fractions, including nested content, to division."""
+    text = str(value or "")
+
+    def braced_group(start: int):
+        while start < len(text) and text[start].isspace():
+            start += 1
+        if start >= len(text) or text[start] != "{":
+            return None
+        depth = 0
+        for index in range(start, len(text)):
+            if text[index] == "{":
+                depth += 1
+            elif text[index] == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start + 1:index], index + 1
+        return None
+
+    for _ in range(16):
+        match = re.search(r"\\frac\s*", text)
+        if not match:
+            break
+        numerator = braced_group(match.end())
+        if numerator is None:
+            break
+        denominator = braced_group(numerator[1])
+        if denominator is None:
+            break
+        replacement = f"(({numerator[0]})/({denominator[0]}))"
+        text = text[:match.start()] + replacement + text[denominator[1]:]
+    return text
+
+
 def _compile_generated_function(expression: str):
     text = str(expression or "").replace("−","-").replace("×","*").replace("÷","/")
     text = text.replace(r"\left","").replace(r"\right","").replace(r"\pi","pi").replace("π","pi")
+    text = _linearize_latex_fractions(text)
     text = re.sub(r"\\sqrt\s*\(([^()]*)\)", r"sqrt(\1)", text)
     text = re.sub(r"\\sqrt\s*\{([^{}]*)\}", r"sqrt(\1)", text)
     for fn in ("sin","cos","tan","sqrt","log","ln"):
@@ -6169,6 +6227,8 @@ def _geogebra_safe_expression(expr: str) -> str | None:
     }
     for old, new in replacements.items():
         value = value.replace(old, new)
+
+    value = _linearize_latex_fractions(value)
 
     # A few common fraction forms. Nested fractions continue to use local fallback.
     for _ in range(4):
@@ -8704,13 +8764,15 @@ def build_setter_question_paper_docx(draft: ExamPaperDraft) -> bytes:
         for part in q.parts:
             pp = doc.add_paragraph()
             pp.paragraph_format.left_indent = Cm(0.5)
-            if part.label:
+            if part.label and not _is_generic_whole_question_label(part.label):
                 rr = pp.add_run(part.label + " "); rr.bold = True
             append_word_mixed_math(
                 pp,
                 _question_prose_without_repeated_math(part.prompt_text, part.equations),
             )
             for eq in part.equations:
+                if _part_equation_repeats_stem(q, eq):
+                    continue
                 ep = doc.add_paragraph(); ep.paragraph_format.left_indent = Cm(1.0)
                 append_word_math(ep, eq)
             if not _is_worksheet_draft(draft):
@@ -9032,6 +9094,35 @@ def _question_prose_without_repeated_math(text: str, equations) -> str:
     return value
 
 
+def _canonical_question_math(value: str) -> str:
+    text = _normalize_generated_math_text(_strip_math_transport_delimiters(str(value or "")))
+    text = text.replace("−", "-").replace("×", r"\times")
+    text = re.sub(r"\\(?:left|right)", "", text)
+    text = re.sub(r"\\lg\b", r"\\log", text)
+    text = re.sub(r"[{}\s]", "", text)
+    return text.lower()
+
+
+def _part_equation_repeats_stem(question, equation: str) -> bool:
+    """Avoid printing the same defining expression in the stem and again below."""
+    key = _canonical_question_math(equation)
+    if not key:
+        return False
+    stem_sources = [
+        str(getattr(question, "stem_text", "") or ""),
+        *[str(item or "") for item in (getattr(question, "stem_equations", []) or [])],
+    ]
+    stem_key = "|".join(_canonical_question_math(item) for item in stem_sources)
+    if key in stem_key:
+        return True
+    # Equivalent integral notation may rewrite a quotient as a negative power.
+    return r"\int" in key and r"\int" in stem_key
+
+
+def _is_generic_whole_question_label(label: str) -> bool:
+    return str(label or "").strip().lower() in {"", "question", "whole question"}
+
+
 def _looks_like_survey_options(text: str) -> bool:
     low = str(text or "").lower()
     return (
@@ -9303,14 +9394,21 @@ def render_setter_preview(draft: ExamPaperDraft) -> None:
                     unsafe_allow_html=True,
                 )
 
-            geogebra_external_tools(
-                question_text=" ".join(
-                    [_normalise_unit_braces(str(q.stem_text or ""))] +
-                    [str(x) for x in (getattr(q, "stem_equations", []) or [])] +
-                    [str(getattr(q, "diagram_spec", "") or "")]
-                ),
-                key_base=f"setter_geogebra_external_{q.question_number}",
+            question_tool_text = " ".join(
+                [_normalise_unit_braces(str(q.stem_text or ""))]
+                + [str(x) for x in (getattr(q, "stem_equations", []) or [])]
+                + [str(getattr(q, "diagram_spec", "") or "")]
             )
+            if re.search(
+                r"\b(graph|curve|plot|sketch|coordinates?|construction|triangle|circle|"
+                r"polygon|quadrilateral|angle|bearing|locus|transformation)\b",
+                question_tool_text,
+                flags=re.I,
+            ):
+                geogebra_external_tools(
+                    question_text=question_tool_text,
+                    key_base=f"setter_geogebra_external_{q.question_number}",
+                )
 
             # Stem prose can itself contain mathematical expressions, so use the
             # MathIO-aware mixed renderer rather than st.write().
@@ -9453,11 +9551,12 @@ def render_setter_preview(draft: ExamPaperDraft) -> None:
                         render_mathio_mixed(_strip_solid3d_block(q.diagram_spec))
 
             for part in q.parts:
-                label = part.label or "Question"
-                if _is_worksheet_draft(draft):
-                    st.markdown(f"#### {label}")
-                else:
-                    st.markdown(f"#### {label} [{part.marks} marks]")
+                label = str(part.label or "").strip()
+                if not _is_generic_whole_question_label(label):
+                    if _is_worksheet_draft(draft):
+                        st.markdown(f"#### {label}")
+                    else:
+                        st.markdown(f"#### {label} [{part.marks} marks]")
 
                 if str(part.prompt_text or "").strip():
                     clean_prompt = _question_prose_without_repeated_math(
@@ -9469,6 +9568,8 @@ def render_setter_preview(draft: ExamPaperDraft) -> None:
                     render_mathio_mixed(preview_prompt)
 
                 for eq in part.equations:
+                    if _part_equation_repeats_stem(q, eq):
+                        continue
                     eq_text = re.sub(r"\\+(?:dots|ldots|cdots)\b", "", str(eq or ""))
                     eq_text = re.sub(r"\.{3,}", "", eq_text)
                     eq_text = re.sub(r"\s{2,}", " ", eq_text).strip()
