@@ -665,6 +665,29 @@ def _normalize_generated_math_text(value: str) -> str:
     if not text:
         return ""
 
+    # Generated questions occasionally put prose inside one pair of maths
+    # delimiters, e.g. \(y=... and the line y=8\). Split this into two
+    # equations so MathIO never typesets ordinary words as variables.
+    def split_prose_from_inline_math(match: re.Match) -> str:
+        body = match.group(1).strip()
+        body = re.sub(
+            r"\\text\{\s*and\s+the\s+line\s*\}",
+            " and the line ",
+            body,
+            flags=re.IGNORECASE,
+        )
+        parts = re.split(
+            r"\s+and\s+the\s+line\s+",
+            body,
+            maxsplit=1,
+            flags=re.IGNORECASE,
+        )
+        if len(parts) == 2 and "=" in parts[0] and "=" in parts[1]:
+            return rf"\({parts[0].strip()}\) and the line \({parts[1].strip()}\)"
+        return match.group(0)
+
+    text = re.sub(r"\\\(([\s\S]*?)\\\)", split_prose_from_inline_math, text)
+
     text = re.sub(r"\\+(?:textbullet|bullet|dots|ldots|cdots)\b\s*", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\.{3,}", "", text)
 
@@ -9125,21 +9148,24 @@ def render_setter_preview(draft: ExamPaperDraft) -> None:
                     )
                 elif graph_spec is not None:
                     figure_number += 1
-                    geogebra_png = render_geogebra_question_graph(
-                        q,
-                        figure_caption=f"Figure {figure_number}",
-                    )
-                    if geogebra_png is None:
-                        # Show the equation-driven graph immediately while GeoGebra capture
-                        # is still pending. The downloaded paper uses this same fallback.
-                        effective_scene_2d = build_function_graph_scene(q)
-                        if effective_scene_2d is not None:
-                            show_scene2d(
-                                effective_scene_2d,
-                                caption=f"Figure {figure_number} · deterministic graph",
-                            )
-                        else:
-                            st.warning("The function could not be rendered by either graph engine.")
+                    # Always show the deterministic equation-driven graph first.
+                    # This works even when GeoGebra is blocked by the school network.
+                    effective_scene_2d = build_function_graph_scene(q)
+                    if effective_scene_2d is not None:
+                        show_scene2d(
+                            effective_scene_2d,
+                            caption=f"Figure {figure_number}",
+                        )
+                    else:
+                        st.warning("The function could not be rendered by the local graph engine.")
+
+                    # Keep the external graph optional so it cannot replace the
+                    # working local graph with a large blank panel.
+                    with st.expander("Optional interactive GeoGebra graph", expanded=False):
+                        render_geogebra_question_graph(
+                            q,
+                            figure_caption=f"Figure {figure_number}",
+                        )
                 elif (
                     _dimensioned_solid_spec(q) is None
                     and getattr(q, "diagram_scene_3d", None) is not None
@@ -10829,8 +10855,10 @@ if role_mode == "For Teacher":
             # LaTeX/MathIO commands and symbols
             \\(?:frac|sqrt|angle|theta|alpha|beta|gamma|delta|pi|sin|cos|tan|arcsin|arccos|arctan|log|ln|times|div|leq|geq|neq|pm|parallel|perp)\b[^\s,.;:!?]*
             |
-            # Explicit equations / inequalities
-            [A-Za-z][A-Za-z0-9_]*\s*(?:=|≤|≥|<|>)\s*[^,.;:!?]+
+            # Explicit equations / inequalities. Stop before prose connectors
+            # so "y=... and the line y=8" becomes two maths fragments.
+            [A-Za-z][A-Za-z0-9_]*\s*(?:=|≤|≥|<|>)\s*.+?
+            (?=\s+(?:and|or|for|where|when|with|from|giving|correct|then)\b|[,.;:!?]|$)
             |
             # Ratios / proportions
             \d+(?:\.\d+)?\s*:\s*\d+(?:\.\d+)?(?:\s*:\s*\d+(?:\.\d+)?)*
@@ -11138,7 +11166,9 @@ def _offline_prompt_mathio_markup(prompt: str) -> str:
 
     # Algebraic equations that are still plain text.
     equation_pattern = re.compile(
-        r"(?<![\w\\])([A-Za-z][A-Za-z0-9_]*(?:\([^)]*\))?\s*=\s*[^,.;:]+)"
+        r"(?<![\w\\])([A-Za-z][A-Za-z0-9_]*(?:\([^)]*\))?\s*=\s*.+?)"
+        r"(?=\s+(?:and|or|for|where|when|with|from|over|giving|correct|then)\b|[,.;:]|$)",
+        flags=re.IGNORECASE,
     )
 
     def equation_repl(match):
