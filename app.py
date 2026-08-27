@@ -4345,17 +4345,29 @@ def make_new_question(track: str, topic: str, difficulty: str) -> None:
     st.session_state.seed_counter += 1
     previous = st.session_state.get("question")
     candidate = generate_question(track, topic, difficulty, seed=seed)
-    # Avoid showing the same template family repeatedly when alternatives exist.
-    for offset in range(1, 7):
-        if not (
-            previous is not None
-            and getattr(previous, "track", None) == track
-            and getattr(previous, "topic_code", None) == topic
-            and getattr(previous, "family", "")
-            and getattr(candidate, "family", "") == getattr(previous, "family", "")
-        ):
-            break
-        candidate = generate_question(track, topic, difficulty, seed=seed + 7919 * offset)
+
+    # Never show the exact same prompt twice in succession. Prefer a different
+    # family when the selected topic has alternatives, but retain the first
+    # different-valued prompt as a safe fallback for single-family topics.
+    same_selection = (
+        previous is not None
+        and getattr(previous, "track", None) == track
+        and getattr(previous, "topic_code", None) == topic
+        and getattr(previous, "difficulty", None) == difficulty
+    )
+    if same_selection:
+        different_prompt = None
+        for offset in range(1, 17):
+            prompt_changed = str(getattr(candidate, "prompt", "")).strip() != str(getattr(previous, "prompt", "")).strip()
+            family_changed = str(getattr(candidate, "family", "")) != str(getattr(previous, "family", ""))
+            if prompt_changed and different_prompt is None:
+                different_prompt = candidate
+            if prompt_changed and family_changed:
+                break
+            candidate = generate_question(track, topic, difficulty, seed=seed + 7919 * offset)
+        else:
+            if different_prompt is not None:
+                candidate = different_prompt
     st.session_state.question = candidate
     reset_current_question()
 
@@ -11618,6 +11630,20 @@ def render_learning_outcome_mixed_mathio(value: str) -> None:
     if not text:
         return
 
+    # Convert the recurring compiled-syllabus notation before generic matching.
+    # This prevents the equation matcher from swallowing ordinary prose such as
+    # “and compute the respective definite integrals”.
+    text = re.sub(
+        r"∫\s*f\s*\(\s*x\s*\)\s*d\s*x\s*from\s*b\s*to\s*a",
+        r"\\(\\int_b^a f(x)\\,dx\\)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"\bf\s*\(\s*x\s*\)\s*<\s*0", r"\\(f(x)<0\\)", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bx\s*=\s*a\b", r"\\(x=a\\)", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bx\s*=\s*b\b", r"\\(x=b\\)", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+-\s+", " — ", text)
+
     # Normalize common syllabus notation first.
     text = text.replace("π", r"\pi").replace("θ", r"\theta")
     text = re.sub(r"(?<!\\)\bpi\b", r"\\pi", text, flags=re.IGNORECASE)
@@ -11626,7 +11652,6 @@ def render_learning_outcome_mixed_mathio(value: str) -> None:
     # Candidate maths fragments. Keep surrounding syllabus prose out of MathIO.
     math_patterns = [
         r"y\s*=\s*[^,;]+",
-        r"[A-Za-z]\s*=\s*[^,;]+",
         r"\\(?:sin|cos|tan|log|ln|sqrt|frac)\b[^,;]*",
         r"\b(?:sin|cos|tan)\s+[A-Za-z0-9()^+\-*/\\ ]+",
         r"\b\d+\s*\^\s*[A-Za-z0-9+\-]+",
@@ -11658,7 +11683,10 @@ def render_learning_outcome_mixed_mathio(value: str) -> None:
             merged[-1][1] = max(merged[-1][1], e)
 
     if not merged:
-        st.markdown(text)
+        # Existing MathIO delimiters were inserted above for expressions such
+        # as f(x)<0, x=a and definite integrals. Use the mixed renderer so
+        # they are not exposed as raw backslashes in Streamlit.
+        render_mathio_mixed(text)
         return
 
     cursor = 0
@@ -12491,8 +12519,15 @@ if role_mode == "For Student":
                 st.rerun()
 
         question: Question | None = st.session_state.question
-        if question is None or question.track != tcode:
-            st.info("Choose a topic and click **Generate question**.")
+        selected_topic_code = topic_labels[topic_label]
+        question_matches_selection = bool(
+            question is not None
+            and question.track == tcode
+            and question.topic_code == selected_topic_code
+            and question.difficulty == difficulty
+        )
+        if not question_matches_selection:
+            st.info("Click **Generate question** to create a new question for the selected topic and difficulty.")
         else:
             st.markdown(f"### {official_topic_code(question.track, question.topic_code)} · {question.topic_name}")
             st.caption(f"{question.strand} · {question.difficulty}")

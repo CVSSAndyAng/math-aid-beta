@@ -120,7 +120,35 @@ def _level_for_track(track: str) -> str:
 def _learning_outcome(topic: Topic, track: str, rng: random.Random) -> tuple[str, str]:
     focuses = OUTCOME_FOCI.get(track, {}).get(topic.code, [])
     if focuses:
-        return rng.choice(focuses), "learning outcomes(1).xlsx"
+        # Some compiled rows contain teacher notes or a neighbouring topic's
+        # activity. Prefer outcomes whose vocabulary actually matches the
+        # selected topic instead of choosing blindly from the row.
+        stop_words = {
+            "and", "the", "with", "from", "into", "their", "functions",
+            "applications", "further", "simple", "basic", "two", "one",
+        }
+        topic_words = {
+            word for word in re.findall(r"[a-z]{4,}", topic.name.lower())
+            if word not in stop_words
+        }
+
+        def outcome_score(value: str) -> tuple[int, int]:
+            lowered = str(value or "").lower()
+            score = sum(3 for word in topic_words if word in lowered)
+            if topic.code.startswith("C") and "integral" in topic.name.lower():
+                score += 5 if "integral" in lowered else -4
+            if "circle" in topic.name.lower():
+                score += 5 if "circle" in lowered else -3
+                score += 3 if "equation" in lowered else 0
+            if "binomial" in topic.name.lower():
+                score += 5 if "binomial" in lowered else -3
+            if re.search(r"provide notes|teacher should|\[big ideas", lowered):
+                score -= 4
+            return score, -len(lowered)
+
+        best_score = max(outcome_score(value)[0] for value in focuses)
+        aligned = [value for value in focuses if outcome_score(value)[0] == best_score]
+        return rng.choice(aligned), "learning outcomes(1).xlsx"
     return (f"Apply {topic.name.lower()} accurately in an appropriate problem.", "learning outcomes(1).xlsx")
 
 
@@ -714,12 +742,275 @@ def _addmath_calculus(track, topic, diff, rng, skill, source):
     return _q(track,topic,diff,f"Find the maximum value of y = {expr}.",skill,["Find the stationary point."],str(yv),[f"x={xv}",f"maximum={yv}"],kind="text",family=fam,source=source)
 
 
+def _signed(value: int) -> str:
+    return f"+ {value}" if value >= 0 else f"- {abs(value)}"
+
+
+def _circle_square(variable: str, centre: int) -> str:
+    sign = "-" if centre >= 0 else "+"
+    return rf"({variable}{sign}{abs(centre)})^2"
+
+
+def _linear_factor(variable: str, root: int) -> str:
+    sign = "-" if root >= 0 else "+"
+    return rf"({variable}{sign}{abs(root)})"
+
+
+def _addmath_topic(track, topic, diff, rng, skill, source):
+    """Generate from the exact Additional Mathematics topic, never its broad strand.
+
+    The old router sent every A-code to one algebra bank, every T-code to one
+    trigonometry bank and every C-code to one calculus bank. That allowed surds
+    under Binomial Theorem, trigonometric equations under Circles and
+    kinematics under Definite Integrals. This dispatcher binds every question
+    family to the selected topic code/name first, then varies values and demand.
+    """
+    code = topic.code.upper()
+    name = topic.name.lower()
+    x = sp.Symbol("x")
+
+    if "quadratic function" in name:
+        h, k = rng.randint(-4, 4), rng.randint(-6, 5)
+        expr = sp.expand((x - h) ** 2 + k)
+        completed_square = rf"{_circle_square('x', h)} {_signed(k)}"
+        if diff == "Foundation":
+            return _q(track, topic, diff, rf"For \(y={completed_square}\), state the turning point.", skill,
+                      ["Read the turning point from completed-square form."], rf"\(({h},{k})\)",
+                      [rf"The turning point is \(({h},{k})\)."], kind="text", family=f"{code}_turning", source=source)
+        if diff == "Stretch":
+            y_value = k + rng.randint(4, 16)
+            roots = sp.solve(sp.Eq(expr, y_value), x)
+            answer = ", ".join(sp.sstr(v) for v in roots)
+            return _q(track, topic, diff, rf"The curve \(y={sp.latex(expr)}\) meets the line \(y={y_value}\). Find the exact x-coordinates of the intersection points.", skill,
+                      ["Equate the two expressions and solve the resulting quadratic."], answer,
+                      [rf"Solve \({sp.latex(expr)}={y_value}\).", rf"\(x={sp.latex(roots[0])}\) or \(x={sp.latex(roots[1])}\)."], kind="text", family=f"{code}_intersection", source=source)
+        return _q(track, topic, diff, rf"Express \(y={sp.latex(expr)}\) in the form \((x-h)^2+k\), and hence state its minimum value.", skill,
+                  ["Complete the square."], str(k), [rf"\(y={completed_square}\).", rf"Minimum value \(={k}\)."], family=f"{code}_complete_square", source=source)
+
+    if "equations and inequalities" in name:
+        r1, r2 = sorted(rng.sample(range(-6, 8), 2))
+        expr = sp.expand((x-r1)*(x-r2))
+        if diff == "Stretch":
+            answer = rf"\(x<{r1}\) or \(x>{r2}\)"
+            return _q(track, topic, diff, rf"Solve the inequality \({sp.latex(expr)}>0\).", skill,
+                      ["Find the roots, then use the sign of the quadratic in each interval."], answer,
+                      [rf"The roots are \({r1}\) and \({r2}\).", answer], kind="text", family=f"{code}_quadratic_inequality", source=source)
+        answer = rf"\(x={r1}\) or \(x={r2}\)"
+        return _q(track, topic, diff, rf"Solve \({sp.latex(expr)}=0\).", skill,
+                  ["Factorise the quadratic."], answer,
+                  [rf"\({_linear_factor('x', r1)}{_linear_factor('x', r2)}=0\).", answer], kind="text", family=f"{code}_quadratic_equation", source=source)
+
+    if "surd" in name:
+        a = rng.choice([2, 3, 5, 6, 7])
+        if diff == "Stretch":
+            b = rng.choice([value for value in [2, 3, 5] if value != a])
+            answer = sp.simplify(1 / (sp.sqrt(a) + sp.sqrt(b)))
+            return _q(track, topic, diff, rf"Rationalise the denominator of \(\frac{{1}}{{\sqrt{{{a}}}+\sqrt{{{b}}}}}\).", skill,
+                      ["Multiply numerator and denominator by the conjugate."], rf"\({sp.latex(answer)}\)",
+                      [rf"Use the conjugate \(\sqrt{{{a}}}-\sqrt{{{b}}}\).", rf"Answer: \({sp.latex(answer)}\)."], kind="text", family=f"{code}_rationalise_sum", source=source)
+        square = rng.choice([4, 9, 16, 25])
+        n = square * a
+        answer = sp.sqrt(n).simplify()
+        return _q(track, topic, diff, rf"Simplify \(\sqrt{{{n}}}\) fully.", skill,
+                  ["Extract the largest square factor."], rf"\({sp.latex(answer)}\)",
+                  [rf"\(\sqrt{{{n}}}=\sqrt{{{square}\times {a}}}={sp.latex(answer)}\)."], kind="text", family=f"{code}_simplify_surd", source=source)
+
+    if "coordinate geometry" in name:
+        m = rng.choice([-3, -2, 2, 3, 4])
+        px, py = rng.randint(-4, 4), rng.randint(-5, 6)
+        if diff == "Stretch":
+            normal_m = sp.Rational(-1, m)
+            c = sp.simplify(py - normal_m * px)
+            answer = rf"\(y={sp.latex(normal_m)}x {_signed(int(c)) if c.is_integer else '+ ' + sp.latex(c)}\)"
+            return _q(track, topic, diff, rf"A line has gradient \({m}\). Find the equation of the line perpendicular to it and passing through \(({px},{py})\).", skill,
+                      ["Perpendicular gradients have product −1."], answer,
+                      [rf"The perpendicular gradient is \({sp.latex(normal_m)}\).", answer], kind="text", family=f"{code}_perpendicular", source=source)
+        c = py - m * px
+        answer = rf"\(y={m}x {_signed(c)}\)"
+        return _q(track, topic, diff, rf"Find the equation of the line with gradient \({m}\) passing through \(({px},{py})\).", skill,
+                  ["Use point-gradient form or substitute into y = mx + c."], answer,
+                  [rf"\(y-{py}={m}(x-{px})\).", answer], kind="text", family=f"{code}_line", source=source)
+
+    if "polynomial" in name or "partial fraction" in name:
+        if diff == "Foundation":
+            root = rng.randint(-4, 4)
+            q = x**2 + rng.randint(1, 5)*x + rng.randint(-5, 5)
+            p = sp.expand((x-root)*q)
+            factor = _linear_factor("x", root)
+            return _q(track, topic, diff, rf"Given that \({factor}\) is a factor of \(p(x)={sp.latex(p)}\), find the quadratic factor.", skill,
+                      ["Divide the polynomial by the stated linear factor."], rf"\({sp.latex(q)}\)",
+                      [rf"\(p(x)={factor}({sp.latex(q)})\)."], kind="text", family=f"{code}_factor_theorem", source=source)
+        a, b = rng.randint(1, 5), rng.randint(1, 5)
+        expr = sp.apart((a*x+b)/((x+1)*(x+2)), x)
+        numerator = f"{'' if a == 1 else a}x+{b}"
+        return _q(track, topic, diff, rf"Express \(\frac{{{numerator}}}{{(x+1)(x+2)}}\) in partial fractions.", skill,
+                  ["Write A/(x+1) + B/(x+2), then compare coefficients."], rf"\({sp.latex(expr)}\)",
+                  [rf"\(\frac{{{numerator}}}{{(x+1)(x+2)}}={sp.latex(expr)}\)."], kind="text", family=f"{code}_partial_fractions", source=source)
+
+    if "exponential" in name or "logarithmic" in name:
+        base, power = rng.choice([2, 3, 5]), rng.randint(2, 5)
+        value = base ** power
+        if diff == "Stretch":
+            shift = rng.randint(1, 4)
+            return _q(track, topic, diff, rf"Solve \(\log_{{{base}}}(x-{shift})={power}\).", skill,
+                      ["Rewrite the logarithmic equation in exponential form."], str(value + shift),
+                      [rf"\(x-{shift}={base}^{power}={value}\).", rf"\(x={value+shift}\)."], family=f"{code}_log_equation", source=source)
+        return _q(track, topic, diff, rf"Solve \({base}^x={value}\).", skill,
+                  ["Express both sides using the same base."], str(power), [rf"\(x={power}\)."], family=f"{code}_exponential_equation", source=source)
+
+    if "binomial" in name:
+        n = rng.randint(4, 7)
+        a = rng.randint(2, 5)
+        if diff == "Foundation":
+            answer = math.comb(n, 2) * a**2
+            return _q(track, topic, diff, rf"Find the coefficient of \(x^2\) in the expansion of \((1+{a}x)^{n}\).", skill,
+                      ["Use the general term of the binomial expansion."], str(answer),
+                      [rf"Coefficient \(=\binom{{{n}}}{{2}}({a})^2={answer}\)."], family=f"{code}_coefficient", source=source)
+        r = rng.randint(2, n-1)
+        answer = math.comb(n, r) * a**r
+        return _q(track, topic, diff, rf"Find the term containing \(x^{r}\) in the expansion of \((1+{a}x)^{n}\).", skill,
+                  [rf"Use \(T_{{r+1}}=\binom{{n}}{{r}}(1)^{{n-r}}({a}x)^r\)."], rf"\({answer}x^{r}\)",
+                  [rf"\(T_{{{r+1}}}=\binom{{{n}}}{{{r}}}({a}x)^{r}={answer}x^{r}\)."], kind="text", family=f"{code}_general_term", source=source)
+
+    if "linear form" in name:
+        a, b = rng.randint(2, 6), rng.randint(1, 8)
+        return _q(track, topic, diff, rf"The variables satisfy \(y={a}e^{{{b}x}}\). Express this relation in the linear form \(Y=mX+c\), stating \(X\) and \(Y\).", skill,
+                  ["Take natural logarithms of both sides."], rf"\(\ln y={b}x+\ln {a}\)",
+                  [rf"\(\ln y=\ln {a}+{b}x\).", rf"Take \(Y=\ln y\) and \(X=x\)."], kind="text", family=f"{code}_linearise", source=source)
+
+    if "circle" in name:
+        h, k, r = rng.randint(-4, 4), rng.randint(-4, 4), rng.randint(2, 7)
+        circle_equation = rf"{_circle_square('x', h)}+{_circle_square('y', k)}={r*r}"
+        if diff == "Foundation":
+            return _q(track, topic, diff, rf"State the centre and radius of the circle \({circle_equation}\).", skill,
+                      ["Compare with (x−a)² + (y−b)² = r²."], rf"Centre \(({h},{k})\), radius \({r}\)",
+                      [rf"Centre \(({h},{k})\); radius \(\sqrt{{{r*r}}}={r}\)."], kind="text", family=f"{code}_centre_radius", source=source)
+        return _q(track, topic, diff, rf"Find the equation of the circle with centre \(({h},{k})\) and radius \({r}\).", skill,
+                  ["Use (x−a)² + (y−b)² = r²."], rf"\({circle_equation}\)",
+                  [rf"\({circle_equation}\)."], kind="text", family=f"{code}_circle_equation", source=source)
+
+    # Route exact calculus topics before the generic trigonometry checks below.
+    if "kinematic" in name:
+        t = sp.Symbol("t")
+        a, b = rng.randint(1, 4), rng.randint(1, 6)
+        displacement = a*t**3+b*t**2
+        velocity = sp.diff(displacement, t)
+        return _q(track, topic, diff, rf"A particle has displacement \(s={sp.latex(displacement)}\). Find its velocity as a function of \(t\).", skill,
+                  ["Velocity is ds/dt."], rf"\(v={sp.latex(velocity)}\)",
+                  [rf"\(v=\frac{{ds}}{{dt}}={sp.latex(velocity)}\)."], kind="text", family=f"{code}_kinematics", source=source)
+
+    if "derivatives of trigonometric" in name:
+        a = rng.randint(2, 6)
+        return _q(track, topic, diff, rf"Differentiate \(y={a}\sin x+\cos x\) with respect to \(x\).", skill,
+                  ["Differentiate sine and cosine term by term."], rf"\({a}\cos x-\sin x\)",
+                  [rf"\(\frac{{dy}}{{dx}}={a}\cos x-\sin x\)."], kind="text", family=f"{code}_trig_derivative", source=source)
+
+    if "indefinite integral" in name or name == "integration":
+        a, n = rng.randint(2, 6), rng.randint(1, 4)
+        expr, ans = a*x**n, sp.integrate(a*x**n, x)
+        return _q(track, topic, diff, rf"Find \(\int {sp.latex(expr)}\,dx\).", skill,
+                  ["Increase the power by one and divide by the new power."], rf"\({sp.latex(ans)}+C\)",
+                  [rf"\(\int {sp.latex(expr)}\,dx={sp.latex(ans)}+C\)."], kind="text", family=f"{code}_indefinite_integral", source=source)
+
+    if "definite integral" in name:
+        if diff == "Stretch":
+            k, upper = rng.randint(2, 5), rng.randint(1, 3)
+            expr = x**2-k
+            ans = sp.integrate(expr, (x, 0, upper))
+            return _q(track, topic, diff, rf"Evaluate \(\int_0^{{{upper}}}({sp.latex(expr)})\,dx\), and state what the sign of your answer means geometrically.", skill,
+                      ["Integrate first; a negative result means the signed area is below the x-axis overall."], rf"\({sp.latex(ans)}\); negative signed area",
+                      [rf"\(\int({sp.latex(expr)})\,dx={sp.latex(sp.integrate(expr,x))}\).", rf"The value is \({sp.latex(ans)}\), so the net signed area is negative."], kind="text", family=f"{code}_signed_definite_integral", source=source)
+        a, upper = rng.randint(1, 5), rng.randint(2, 6)
+        integrand = x if a == 1 else a*x
+        ans = sp.integrate(integrand, (x, 0, upper))
+        return _q(track, topic, diff, rf"Evaluate \(\int_0^{{{upper}}}{sp.latex(integrand)}\,dx\).", skill,
+                  ["Find an antiderivative, then substitute the upper and lower limits."], rf"\({sp.latex(ans)}\)",
+                  [rf"\(\int {sp.latex(integrand)}\,dx={sp.latex(sp.integrate(integrand,x))}\).", rf"The definite integral is \({sp.latex(ans)}\)."], kind="text", family=f"{code}_definite_integral", source=source)
+
+    if "applications of integration" in name:
+        a, upper = rng.randint(1, 4), rng.randint(2, 5)
+        integrand = x if a == 1 else a*x
+        ans = sp.integrate(integrand, (x, 0, upper))
+        return _q(track, topic, diff, rf"Find the area bounded by the curve \(y={sp.latex(integrand)}\), the x-axis and the lines \(x=0\) and \(x={upper}\).", skill,
+                  ["Express the area as a definite integral."], rf"\({sp.latex(ans)}\) square units",
+                  [rf"Area \(=\int_0^{upper}{sp.latex(integrand)}\,dx={sp.latex(ans)}\)."], kind="text", family=f"{code}_area_integral", source=source)
+
+    if "trigonometric" in name or "trigonometry" in name or "identit" in name:
+        angle = rng.choice([30, 45, 60])
+        value = {30: r"\frac12", 45: r"\frac{\sqrt2}{2}", 60: r"\frac{\sqrt3}{2}"}[angle]
+        if "identit" in name:
+            identity_variants = [
+                (
+                    rf"Simplify \(\frac{{1-\cos^2 x}}{{\sin x}}\).",
+                    rf"\(\sin x\)",
+                    rf"\(1-\cos^2x=\sin^2x\), so the expression is \(\sin x\).",
+                    "pythagorean_sine",
+                ),
+                (
+                    rf"Simplify \(\frac{{\sin^2 x}}{{1+\cos x}}\).",
+                    rf"\(1-\cos x\)",
+                    rf"\(\sin^2x=(1-\cos x)(1+\cos x)\), so the expression is \(1-\cos x\).",
+                    "factor_identity",
+                ),
+                (
+                    rf"Simplify \((1+\tan^2 x)\cos^2 x\).",
+                    rf"\(1\)",
+                    rf"Since \(1+\tan^2x=\sec^2x\), the expression is \(\sec^2x\cos^2x=1\).",
+                    "secant_identity",
+                ),
+            ]
+            prompt, answer, solution, variant = rng.choice(identity_variants)
+            return _q(track, topic, diff, prompt, skill,
+                      ["Use a standard Pythagorean trigonometric identity."], answer,
+                      [solution], kind="text", family=f"{code}_{variant}", source=source)
+        return _q(track, topic, diff, rf"Solve \(\sin x={value}\) for \(0^\circ\le x\le180^\circ\).", skill,
+                  ["Use the sine graph or exact-angle values."], rf"\(x={angle}^\circ\) or \(x={180-angle}^\circ\)",
+                  [rf"The reference angle is \({angle}^\circ\).", rf"\(x={angle}^\circ\) or \(x={180-angle}^\circ\)."], kind="text", family=f"{code}_trig_equation", source=source)
+
+    if "triangle" in name:
+        a, b, angle = rng.randint(5, 10), rng.randint(6, 12), rng.choice([30, 45, 60])
+        c = math.sqrt(a*a+b*b-2*a*b*math.cos(math.radians(angle)))
+        return _q(track, topic, diff, rf"In triangle ABC, \(AB={a}\), \(AC={b}\) and \(\angle BAC={angle}^\circ\). Find \(BC\), giving your answer to 3 significant figures.", skill,
+                  ["Use the cosine rule."], f"{c:.3g}",
+                  [rf"\(BC^2={a}^2+{b}^2-2({a})({b})\cos {angle}^\circ\).", rf"\(BC={c:.3g}\)."], family=f"{code}_cosine_rule", source=source)
+
+    if "tangent" in name or "normal" in name:
+        a, x0 = rng.randint(2, 5), rng.randint(1, 4)
+        y0, gradient = a*x0*x0, 2*a*x0
+        return _q(track, topic, diff, rf"The curve is \(y={a}x^2\). Find the equation of the tangent at the point where \(x={x0}\).", skill,
+                  ["Differentiate to find the gradient, then use point-gradient form."], rf"\(y-{y0}={gradient}(x-{x0})\)",
+                  [rf"\(\frac{{dy}}{{dx}}={2*a}x\), so the gradient is \({gradient}\).", rf"\(y-{y0}={gradient}(x-{x0})\)."], kind="text", family=f"{code}_tangent", source=source)
+
+    if "stationary" in name or "maxima" in name or "minima" in name:
+        h, k = rng.randint(-4, 4), rng.randint(-6, 6)
+        sign = -1 if diff == "Stretch" else 1
+        expr = sp.expand(sign*(x-h)**2+k)
+        nature = "maximum" if sign < 0 else "minimum"
+        return _q(track, topic, diff, rf"Find the stationary point of \(y={sp.latex(expr)}\) and determine its nature.", skill,
+                  ["Set dy/dx = 0, then use the second derivative."], rf"\(({h},{k})\), {nature}",
+                  [rf"\(\frac{{dy}}{{dx}}={sp.latex(sp.diff(expr,x))}=0\) gives \(x={h}\).", rf"The point is \(({h},{k})\), a {nature}."], kind="text", family=f"{code}_stationary_nature", source=source)
+
+    if "derivative" in name or "differentiation" in name:
+        a, n, b = rng.randint(2, 5), rng.randint(2, 5), rng.randint(-5, 5)
+        expr = a*x**n+b*x
+        ans = sp.diff(expr, x)
+        return _q(track, topic, diff, rf"Differentiate \(y={sp.latex(expr)}\) with respect to \(x\).", skill,
+                  ["Apply the power rule term by term."], rf"\({sp.latex(ans)}\)",
+                  [rf"\(\frac{{dy}}{{dx}}={sp.latex(ans)}\)."], kind="text", family=f"{code}_differentiate", source=source)
+
+
+    # This is intentionally conservative: a selected Additional Mathematics
+    # topic must never fall through to an unrelated broad-strand question.
+    return _q(track, topic, diff, f"State one key mathematical relationship used in {topic.name}.", skill,
+              [f"Review the defining relationship for {topic.name}."], topic.name,
+              [f"This item is limited to {topic.name}."], kind="text", family=f"{code}_topic_review", source=source)
+
+
 def _generator_for(topic: Topic) -> Callable:
     code = topic.code
     name = topic.name.lower()
-    if code.startswith("C"): return _addmath_calculus
-    if code.startswith("T") and topic.strand in {"Geometry and Trigonometry", "Calculus"}: return _addmath_trig
-    if code.startswith("A") and topic.strand == "Algebra": return _addmath_algebra
+    if topic.strand in {"Algebra", "Calculus", "Geometry and Trigonometry"} and code[:1] in {"A", "C", "T"}:
+        return _addmath_topic
     if any(k in name for k in ["four operations", "numbers", "indices", "standard form"]): return _numbers
     if "percentage" in name or "financial" in name or "practical situations" in name: return _percentage
     if re.search(r"\bratio\b|\bproportion\b|\bmap scale\b|\bscale\b", name): return _ratio
