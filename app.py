@@ -11597,7 +11597,8 @@ const Streamlit={
 };
 const video=document.getElementById('video'),preview=document.getElementById('preview'),canvas=document.getElementById('canvas');
 const message=document.getElementById('message'),take=document.getElementById('take'),retake=document.getElementById('retake'),switchBtn=document.getElementById('switch'),badge=document.getElementById('badge');
-let stream=null,devices=[],deviceIndex=0;
+let stream=null,devices=[],deviceIndex=0,cameraOpen=false;
+function frameHeight(){Streamlit.setFrameHeight(cameraOpen?540:95)}
 function stop(){if(stream)stream.getTracks().forEach(t=>t.stop());stream=null}
 async function cameras(){
  try{const all=await navigator.mediaDevices.enumerateDevices();devices=all.filter(d=>d.kind==='videoinput');
@@ -11605,7 +11606,7 @@ async function cameras(){
  }catch(e){devices=[]}
 }
 async function start(useDevice=false){
- stop();document.querySelector('.stage').style.display='flex';message.style.display='flex';message.textContent='Starting outward-facing camera…';take.disabled=true;take.style.display='inline-block';preview.style.display='none';video.style.display='block';retake.style.display='none';
+ stop();cameraOpen=true;document.querySelector('.stage').style.display='flex';message.style.display='flex';message.textContent='Starting outward-facing camera…';take.disabled=true;take.style.display='inline-block';preview.style.display='none';video.style.display='block';retake.style.display='none';frameHeight();
  try{
    let constraints={audio:false,video:{facingMode:{ideal:'environment'},width:{ideal:1920},height:{ideal:1080}}};
    if(useDevice&&devices[deviceIndex])constraints.video={deviceId:{exact:devices[deviceIndex].deviceId},width:{ideal:1920},height:{ideal:1080}};
@@ -11616,7 +11617,7 @@ async function start(useDevice=false){
    try{stream=await navigator.mediaDevices.getUserMedia({audio:false,video:true});video.srcObject=stream;await video.play();await cameras();message.style.display='none';take.disabled=false;take.textContent='Take photo';badge.textContent='Available camera';}
    catch(second){message.textContent='Camera unavailable. Check browser permission, or use the upload option below.';badge.textContent='Camera';}
  }
- Streamlit.setFrameHeight(document.documentElement.scrollHeight+4);
+ frameHeight();
 }
 take.addEventListener('click',async()=>{
  if(!stream){await start(false);return}
@@ -11626,14 +11627,14 @@ take.addEventListener('click',async()=>{
 });
 retake.addEventListener('click',()=>{preview.style.display='none';video.style.display='block';take.style.display='inline-block';retake.style.display='none'});
 switchBtn.addEventListener('click',async()=>{if(!devices.length)return;deviceIndex=(deviceIndex+1)%devices.length;await start(true)});
-window.addEventListener('pagehide',stop);window.addEventListener('message',e=>{if(e.data?.type==='streamlit:render')Streamlit.setFrameHeight(document.documentElement.scrollHeight+4)});
-Streamlit.setComponentReady();Streamlit.setFrameHeight(95);
+window.addEventListener('pagehide',stop);window.addEventListener('message',e=>{if(e.data?.type==='streamlit:render')frameHeight()});
+Streamlit.setComponentReady();frameHeight();
 </script></body></html>'''
 
 
 def _prepare_rear_camera_frontend() -> Path:
     """Materialise the rear-camera component in Streamlit's writable temp area."""
-    runtime_dir = Path(tempfile.gettempdir()) / "math_buddy_rear_camera_component_v2"
+    runtime_dir = Path(tempfile.gettempdir()) / "math_buddy_rear_camera_component_v3"
     runtime_dir.mkdir(parents=True, exist_ok=True)
     index_file = runtime_dir / "index.html"
     try:
@@ -11646,7 +11647,7 @@ def _prepare_rear_camera_frontend() -> Path:
 
 
 _rear_camera_component = st_components_v1.declare_component(
-    "math_buddy_rear_camera_v2",
+    "math_buddy_rear_camera_v3",
     path=str(_prepare_rear_camera_frontend()),
 )
 
@@ -11724,11 +11725,11 @@ def _save_geometry_board_result(result, *, caption: str = "Geometry construction
         return False
 
     st.session_state.setdefault("student_lesson_notes", []).append({
-        "type": "image",
+        "kind": "image",
         "content": image_bytes,
         "caption": caption,
         "mime_type": "image/png",
-        "name": "geometry_construction.png",
+        "source_name": "geometry_construction.png",
     })
     st.session_state["_last_geometry_board_save_id"] = save_id
     return True
@@ -11741,13 +11742,13 @@ def _student_notes_docx():
     doc.add_heading("Lesson Notes", 1)
 
     for item in _student_notes():
-        if item.get("kind") == "text":
+        if (item.get("kind") or item.get("type")) == "text":
             paragraph = doc.add_paragraph()
             try:
                 append_word_mixed_math(paragraph, str(item.get("content", "")))
             except Exception:
                 paragraph.add_run(str(item.get("content", "")))
-        elif item.get("kind") == "image":
+        elif (item.get("kind") or item.get("type")) == "image":
             image_bytes = _normalise_student_image_bytes(item.get("content", b""))
             if image_bytes is not None:
                 p = doc.add_paragraph()
@@ -11800,7 +11801,7 @@ def _student_notes_pdf():
         )
 
     for item in _student_notes():
-        if item.get("kind") == "text":
+        if (item.get("kind") or item.get("type")) == "text":
             safe = (
                 str(item.get("content", ""))
                 .replace("&", "&amp;")
@@ -11809,7 +11810,7 @@ def _student_notes_pdf():
                 .replace("\n", "<br/>")
             )
             story += [Paragraph(safe, styles["BodyText"]), Spacer(1, 8)]
-        elif item.get("kind") == "image":
+        elif (item.get("kind") or item.get("type")) == "image":
             image_bytes = _normalise_student_image_bytes(item.get("content", b""))
             if image_bytes is not None:
                 try:
@@ -11834,6 +11835,90 @@ def _clear_student_notes_after_download():
     st.session_state.student_lesson_notes = []
     st.session_state.pop("student_note_draft", None)
     _reset_student_picture_inputs()
+
+
+def _render_saved_student_notes_and_downloads() -> None:
+    """Keep saved notes and their downloads visible above optional camera UI."""
+    notes = _student_notes()
+    st.markdown("#### Saved lesson notes")
+    if not notes:
+        st.caption("No saved notes yet.")
+    else:
+        for index, item in enumerate(notes, 1):
+            with st.container(border=True):
+                st.markdown(f"**Item {index}**")
+                if (item.get("kind") or item.get("type")) == "text":
+                    render_guidance_mixed_mathio(str(item.get("content", "")))
+                elif (item.get("kind") or item.get("type")) == "image":
+                    st.image(item.get("content", b""), width=420)
+                    if item.get("caption"):
+                        st.caption(str(item["caption"]))
+
+    st.markdown("#### Download lesson notes")
+    if not notes:
+        st.caption(
+            "Save at least one typed note, handwritten page, picture or geometry construction "
+            "to enable downloads."
+        )
+        d1, d2 = st.columns(2)
+        d1.button(
+            "⬇️ Download notes as Word",
+            disabled=True,
+            use_container_width=True,
+            key="student_notes_docx_empty",
+        )
+        d2.button(
+            "⬇️ Download notes as PDF",
+            disabled=True,
+            use_container_width=True,
+            key="student_notes_pdf_empty",
+        )
+        return
+
+    st.caption(
+        "Download a copy when you are ready. Saved notes stay on screen until you clear them."
+    )
+    export_error = ""
+    try:
+        docx_data = _student_notes_docx()
+    except Exception as exc:
+        docx_data = None
+        export_error = f"Word export could not be prepared: {type(exc).__name__}: {exc}"
+    try:
+        pdf_data = _student_notes_pdf()
+    except Exception as exc:
+        pdf_data = None
+        if not export_error:
+            export_error = f"PDF export could not be prepared: {type(exc).__name__}: {exc}"
+    if export_error:
+        st.warning(export_error)
+
+    d1, d2 = st.columns(2)
+    if docx_data is not None:
+        d1.download_button(
+            "⬇️ Download notes as Word",
+            data=docx_data,
+            file_name=f"{_student_download_basename()}.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            use_container_width=True,
+            key="student_notes_docx_download",
+        )
+    else:
+        d1.button("Word download unavailable", disabled=True, use_container_width=True, key="student_notes_docx_unavailable")
+    if pdf_data is not None:
+        d2.download_button(
+            "⬇️ Download notes as PDF",
+            data=pdf_data,
+            file_name=f"{_student_download_basename()}.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+            key="student_notes_pdf_download",
+        )
+    else:
+        d2.button("PDF download unavailable", disabled=True, use_container_width=True, key="student_notes_pdf_unavailable")
+    if st.button("🗑️ Clear saved notes", key="student_notes_clear_saved", use_container_width=True):
+        _clear_student_notes_after_download()
+        st.rerun()
 
 
 
@@ -12504,6 +12589,38 @@ if role_mode == "For Student":
                     st.session_state.student_lesson_handwriting_version = handwriting_version + 1
                     st.rerun()
 
+        # Keep the learning tools above the optional camera. A camera permission
+        # prompt or slow mobile camera must never hide the core whiteboard tools.
+        st.markdown("#### Working tools")
+        geogebra_external_tools(
+            question_text="",
+            key_base="student_whiteboard_geogebra",
+        )
+        student_scientific_calculator(
+            key_base="student_whiteboard_calculator"
+        )
+        st.info(
+            "GeoGebra opens in a separate tab. Export your GeoGebra drawing as an image, "
+            "then upload and save that image below so it becomes part of your lesson notes."
+        )
+
+        with st.expander("📐 Geometry construction board", expanded=False):
+            st.caption(
+                "Use Apple Pencil, touch or mouse. Choose Pencil, Line, Compass, Protractor, "
+                "Ruler or Eraser from the labelled toolbar. Press Save to notes when finished."
+            )
+            geometry_board_result = _geometry_working_board(
+                key="student_lesson_geometry_board",
+                height=720,
+            )
+            if geometry_board_result and _save_geometry_board_result(
+                geometry_board_result,
+                caption="Geometry construction / working",
+            ):
+                st.success("Geometry working saved to lesson notes.")
+
+        _render_saved_student_notes_and_downloads()
+
         st.markdown("#### Add a picture")
         picture_version = _student_picture_input_version()
         photo = rear_camera_input(
@@ -12545,115 +12662,6 @@ if role_mode == "For Student":
                     _reset_student_picture_inputs()
                     st.success("Picture saved to the lesson notes.")
                     st.rerun()
-
-
-        st.markdown("#### Working tools")
-        geogebra_external_tools(
-            question_text="",
-            key_base="student_whiteboard_geogebra",
-        )
-        student_scientific_calculator(
-            key_base="student_whiteboard_calculator"
-        )
-        st.info(
-            "GeoGebra opens in a separate tab. Export your GeoGebra drawing as an image, "
-            "then upload and save that image above so it becomes part of your lesson notes."
-        )
-
-        with st.expander("📐 Geometry construction board", expanded=False):
-
-            st.caption("Use Apple Pencil, touch or mouse. Choose Pencil, Line, Compass, Protractor, Ruler or Eraser from the labelled toolbar. Press Save to notes when finished.")
-
-            geometry_board_result = _geometry_working_board(key="student_lesson_geometry_board", height=720)
-
-            if geometry_board_result and _save_geometry_board_result(geometry_board_result, caption="Geometry construction / working"):
-
-                st.success("Geometry working saved to lesson notes.")
-
-
-        st.markdown("#### Saved lesson notes")
-        if not _student_notes():
-            st.caption("No saved notes yet.")
-        else:
-            for index, item in enumerate(_student_notes(), 1):
-                with st.container(border=True):
-                    st.markdown(f"**Item {index}**")
-                    if item.get("kind") == "text":
-                        render_guidance_mixed_mathio(str(item.get("content", "")))
-                    elif item.get("kind") == "image":
-                        st.image(item.get("content", b""), width=420)
-                        if item.get("caption"):
-                            st.caption(str(item["caption"]))
-
-        if _student_notes():
-            st.markdown("#### Download lesson notes")
-            st.caption(
-                "Download a copy when you are ready. Saved notes are kept on screen "
-                "until you choose **Clear saved notes**."
-            )
-
-            export_error = ""
-            try:
-                docx_data = _student_notes_docx()
-            except Exception as exc:
-                docx_data = None
-                export_error = f"Word export could not be prepared: {type(exc).__name__}: {exc}"
-
-            try:
-                pdf_data = _student_notes_pdf()
-            except Exception as exc:
-                pdf_data = None
-                if not export_error:
-                    export_error = f"PDF export could not be prepared: {type(exc).__name__}: {exc}"
-
-            if export_error:
-                st.warning(export_error)
-
-            d1, d2 = st.columns(2)
-            with d1:
-                if docx_data is not None:
-                    st.download_button(
-                        "⬇️ Download notes as Word",
-                        data=docx_data,
-                        file_name=f"{_student_download_basename()}.docx",
-                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                        use_container_width=True,
-                        key="student_notes_docx_download",
-                    )
-                else:
-                    st.button(
-                        "Word download unavailable",
-                        disabled=True,
-                        use_container_width=True,
-                        key="student_notes_docx_unavailable",
-                    )
-
-            with d2:
-                if pdf_data is not None:
-                    st.download_button(
-                        "⬇️ Download notes as PDF",
-                        data=pdf_data,
-                        file_name=f"{_student_download_basename()}.pdf",
-                        mime="application/pdf",
-                        use_container_width=True,
-                        key="student_notes_pdf_download",
-                    )
-                else:
-                    st.button(
-                        "PDF download unavailable",
-                        disabled=True,
-                        use_container_width=True,
-                        key="student_notes_pdf_unavailable",
-                    )
-
-            if st.button(
-                "🗑️ Clear saved notes",
-                key="student_notes_clear_saved",
-                use_container_width=True,
-            ):
-                _clear_student_notes_after_download()
-                st.rerun()
-
 st.caption(
         f"Educational tool, not an official SEAB/MOE product. Gemini default model: {DEFAULT_MODEL}. "
         "Generated questions are original and are not past-year examination questions."
