@@ -6994,11 +6994,21 @@ def _question_requests_student_draw_graph(question) -> bool:
 
 
 def _question_claims_graph_is_shown(question) -> bool:
-    text=" ".join(_question_equation_sources(question)).lower()
+    """Return True only when students must use a supplied visual graph.
+
+    In calculus questions, wording such as "a curve is given by the function"
+    introduces an equation; it does not promise that a graph has been supplied.
+    Treating the word ``given`` by itself as a visual cue incorrectly subjected
+    those questions to the hidden graph-equation fail-safe.
+    """
+    text = " ".join(_question_equation_sources(question)).lower()
     return bool(re.search(
-        r"\b(graph|curve|diagram)\b.{0,35}\b(shows|shown|below|given)\b|"
-        r"\b(shows|shown)\b.{0,35}\b(graph|curve)\b|"
-        r"\bfrom the graph\b",
+        r"\b(?:graph|curve|diagram)\s+(?:is\s+)?(?:shown|displayed|plotted)\b|"
+        r"\b(?:graph|curve|diagram)\s+(?:is\s+)?given\s+(?:below|above)\b|"
+        r"\b(?:shown|displayed|plotted|given)\s+(?:below|above)\b.{0,35}"
+        r"\b(?:graph|curve|diagram)\b|"
+        r"\b(?:the\s+)?(?:graph|curve|diagram)\s+(?:below|above)\b|"
+        r"\b(?:from|using|use)\s+(?:the\s+)?(?:given\s+)?(?:graph|curve|diagram)\b",
         text,
         flags=re.I,
     ))
