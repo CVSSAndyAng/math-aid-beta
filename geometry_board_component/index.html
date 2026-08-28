@@ -86,7 +86,7 @@ canvas{position:absolute;inset:0;width:100%;height:100%;touch-action:none;cursor
         <input id="lineLength" type="number" min="0.1" max="50" step="0.1" inputmode="decimal" placeholder="free">
         <span>units</span>
       </label>
-      <label class="length-control" id="radiusControl">Compass radius
+      <label class="length-control" id="radiusControl">Radius: needle → pencil tip
         <input id="compassRadius" type="number" min="0.5" max="20" step="0.1" inputmode="decimal" value="7.0">
         <span>units</span>
       </label>
@@ -205,7 +205,7 @@ function setCompassRadius(units){
   const side=shortestDelta(c.pencilAngle,c.needleAngle)>=0?1:-1;
   c.pencilAngle=c.needleAngle+side*separation;
   compassRadiusInput.value=(compassRadiusPx()/20).toFixed(1);
-  measureEl.textContent="Compass radius: "+compassRadiusInput.value+" units";
+  measureEl.textContent="Radius (needle → pencil tip): "+compassRadiusInput.value+" units";
   redrawOverlay()
 }
 
@@ -269,6 +269,43 @@ function eraseSegmentsAt(x,y){
   return segments.length!==before
 }
 
+function drawCompassRadiusDimension(needle,pencil){
+  const c=compass,dx=pencil[0]-needle[0],dy=pencil[1]-needle[1],length=Math.max(1,Math.hypot(dx,dy));
+  let nx=-dy/length,ny=dx/length;
+  const mx=(needle[0]+pencil[0])/2,my=(needle[1]+pencil[1])/2,offset=34;
+  const plusDistance=Math.hypot(mx+nx*offset-c.cx,my+ny*offset-c.cy);
+  const minusDistance=Math.hypot(mx-nx*offset-c.cx,my-ny*offset-c.cy);
+  if(minusDistance>plusDistance){nx=-nx;ny=-ny}
+  const a=[needle[0]+nx*offset,needle[1]+ny*offset];
+  const b=[pencil[0]+nx*offset,pencil[1]+ny*offset];
+
+  ctx.save();
+  ctx.strokeStyle="rgba(76,67,166,.72)";ctx.lineWidth=1.4;ctx.setLineDash([4,4]);
+  ctx.beginPath();ctx.moveTo(needle[0],needle[1]);ctx.lineTo(a[0],a[1]);
+  ctx.moveTo(pencil[0],pencil[1]);ctx.lineTo(b[0],b[1]);ctx.stroke();ctx.setLineDash([]);
+  ctx.strokeStyle="#5044b5";ctx.lineWidth=2;
+  ctx.beginPath();ctx.moveTo(a[0],a[1]);ctx.lineTo(b[0],b[1]);ctx.stroke();
+  const angle=Math.atan2(dy,dx),arrow=8,spread=.55;
+  for(const [point,direction] of [[a,angle],[b,angle+Math.PI]]){
+    ctx.beginPath();ctx.moveTo(point[0],point[1]);
+    ctx.lineTo(point[0]+arrow*Math.cos(direction+spread),point[1]+arrow*Math.sin(direction+spread));
+    ctx.moveTo(point[0],point[1]);
+    ctx.lineTo(point[0]+arrow*Math.cos(direction-spread),point[1]+arrow*Math.sin(direction-spread));ctx.stroke()
+  }
+
+  const label="Radius (needle → pencil tip): "+(length/20).toFixed(1)+" units";
+  const lx=(a[0]+b[0])/2+nx*15,ly=(a[1]+b[1])/2+ny*15;
+  ctx.font="bold 11px Arial";ctx.textAlign="center";ctx.textBaseline="middle";
+  const labelWidth=ctx.measureText(label).width+10;
+  ctx.fillStyle="rgba(255,255,255,.94)";ctx.fillRect(lx-labelWidth/2,ly-9,labelWidth,18);
+  ctx.fillStyle="#3f358f";ctx.fillText(label,lx,ly);
+
+  ctx.font="bold 10px Arial";ctx.textBaseline="alphabetic";
+  ctx.fillStyle="#333";ctx.fillText("Needle / centre",a[0],a[1]+ny*14);
+  ctx.fillText("Pencil tip",b[0],b[1]+ny*14);
+  ctx.restore()
+}
+
 function drawCompass(){
   if(!compass.visible)return;
   const c=compass;
@@ -291,11 +328,11 @@ function drawCompass(){
   ctx.strokeStyle="#333";ctx.lineWidth=2;
   ctx.beginPath();ctx.moveTo(needle[0],needle[1]);ctx.lineTo(needle[0]-4,needle[1]+15);ctx.stroke();
 
-  // pencil leg
+  // pencil body: its sharp contact point is exactly the arc endpoint used below.
+  ctx.save();ctx.translate(pencil[0],pencil[1]);ctx.rotate(c.pencilAngle);
   ctx.strokeStyle="#c98900";ctx.fillStyle="#ffc347";ctx.lineWidth=2;
-  ctx.beginPath();ctx.moveTo(pencil[0]-5,pencil[1]-18);ctx.lineTo(pencil[0]+5,pencil[1]-18);
-  ctx.lineTo(pencil[0]+5,pencil[1]+12);ctx.lineTo(pencil[0],pencil[1]+23);
-  ctx.lineTo(pencil[0]-5,pencil[1]+12);ctx.closePath();ctx.fill();ctx.stroke();
+  ctx.beginPath();ctx.moveTo(-34,-6);ctx.lineTo(-6,-6);ctx.lineTo(0,0);
+  ctx.lineTo(-6,6);ctx.lineTo(-34,6);ctx.closePath();ctx.fill();ctx.stroke();ctx.restore();
 
   // hinge
   ctx.fillStyle="#151515";ctx.beginPath();ctx.arc(c.cx,c.cy,15,0,Math.PI*2);ctx.fill();
@@ -306,11 +343,8 @@ function drawCompass(){
   ctx.beginPath();ctx.arc(needle[0],needle[1],8,0,Math.PI*2);ctx.fill();ctx.stroke();
   ctx.beginPath();ctx.arc(pencil[0],pencil[1],8,0,Math.PI*2);ctx.fill();ctx.stroke();
 
-  // radius hint
-  ctx.font="12px Arial";ctx.fillStyle="#333";
-  ctx.fillText("r = "+(compassRadiusPx()/20).toFixed(1)+" units",c.cx+18,c.cy-20);
-
   ctx.restore();
+  drawCompassRadiusDimension(needle,pencil);
 }
 
 function drawProtractor(){
@@ -476,8 +510,8 @@ function setTool(t){
   lengthControl.classList.toggle("visible",tool==="line");
   radiusControl.classList.toggle("visible",tool==="compass");
   if(tool==="compass"){
-    statusEl.textContent="Compass — type a radius or adjust the white handle; drag hinge to move; drag pencil tip to draw an arc";
-    hintEl.textContent="Compass: set radius above • hinge = move • pencil tip = sweep arc"
+    statusEl.textContent="Compass — radius is measured from the needle (arc centre) to the pencil tip";
+    hintEl.textContent="Compass: radius = needle → pencil tip • hinge = move • pencil tip = sweep arc"
   }else if(tool==="protractor"&&protractor.visible){
     statusEl.textContent="Protractor — drag its body to move; drag top handle to rotate; drag from centre to place/read a ray";
     hintEl.textContent="Protractor: body = move • top handle = rotate • centre = measure/draw ray"
@@ -662,7 +696,7 @@ function pointerMove(e){
       c.sweepLast=ang
     }
     compassRadiusInput.value=(compassRadiusPx()/20).toFixed(1);
-    measureEl.textContent="Compass radius: "+compassRadiusInput.value+" units";
+    measureEl.textContent="Radius (needle → pencil tip): "+compassRadiusInput.value+" units";
     redrawOverlay();return
   }
 
