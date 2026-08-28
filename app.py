@@ -14,6 +14,7 @@ import math
 import json
 import os
 import re
+import threading
 
 from pathlib import Path
 import html
@@ -27,7 +28,7 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as st_components_v1
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 from docx import Document
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
@@ -515,6 +516,25 @@ button[data-baseweb="tab"][aria-selected="true"] { background:#eef2ff; color:#33
 
 MAX_FILE_BYTES = 12 * 1024 * 1024
 MAX_TOTAL_BYTES = 30 * 1024 * 1024
+MAX_SAVED_NOTES = 30
+MAX_SAVED_NOTE_BYTES = 12 * 1024 * 1024
+
+
+@st.cache_resource
+def _shared_capacity_controls():
+    """Process-wide gates shared by every Streamlit student session."""
+    return SimpleNamespace(document_jobs=threading.BoundedSemaphore(1))
+
+
+def _run_document_job(builder, *args, **kwargs):
+    """Keep CPU-heavy Word/PDF rendering from running concurrently."""
+    gate = _shared_capacity_controls().document_jobs
+    if not gate.acquire(timeout=60):
+        raise RuntimeError("Document generation is busy. Please try the download again shortly.")
+    try:
+        return builder(*args, **kwargs)
+    finally:
+        gate.release()
 
 
 _MATHIO_RENDER_SEQ = 0
@@ -9603,16 +9623,52 @@ def render_setter_preview(draft: ExamPaperDraft) -> None:
                     st.caption("Answer space included in downloaded paper.")
 
 
+@st.cache_data(ttl=1800, max_entries=96, show_spinner=False)
+def _optimise_gemini_image(name: str, mime: str, data: bytes) -> tuple[str, bytes]:
+    """Downsample classroom photos before base64/API transport."""
+    if mime not in {"image/png", "image/jpeg", "image/webp"}:
+        return mime, data
+    try:
+        with Image.open(BytesIO(data)) as source:
+            source.load()
+            if source.width * source.height > 24_000_000:
+                raise GeminiTutorError(
+                    f"{name} has too many pixels. Resize or crop the image before uploading.",
+                    category="input",
+                )
+            image = ImageOps.exif_transpose(source)
+            original_size = image.size
+            image.thumbnail((1800, 1800), Image.Resampling.LANCZOS)
+            resized = image.size != original_size
+            if mime == "image/png":
+                if image.mode not in ("RGB", "RGBA"):
+                    image = image.convert("RGBA" if "transparency" in image.info else "RGB")
+                output = BytesIO()
+                image.save(output, format="PNG", optimize=True)
+                encoded = output.getvalue()
+                return mime, encoded if resized or len(encoded) < len(data) else data
+            image = image.convert("RGB")
+            output = BytesIO()
+            image.save(output, format="JPEG", quality=86, optimize=True)
+            encoded = output.getvalue()
+            return "image/jpeg", encoded if resized or len(encoded) < len(data) else data
+    except GeminiTutorError:
+        raise
+    except Exception as exc:
+        raise GeminiTutorError(f"{name} could not be read as an image.", category="input") from exc
+
+
 def uploaded_assets(files: list[Any] | None) -> list[UploadedAsset]:
     files = files or []
     assets: list[UploadedAsset] = []
     total = 0
     for f in files:
         data = f.getvalue()
-        total += len(data)
         if len(data) > MAX_FILE_BYTES:
             raise GeminiTutorError(f"{f.name} is larger than the app's 12 MB per-file limit.", category="input")
         mime = f.type or "application/octet-stream"
+        mime, data = _optimise_gemini_image(str(f.name), str(mime), data)
+        total += len(data)
         assets.append(UploadedAsset(name=f.name, mime_type=mime, data=data))
     if total > MAX_TOTAL_BYTES:
         raise GeminiTutorError("Uploads exceed the app's 30 MB total limit.", category="input")
@@ -10410,7 +10466,9 @@ if role_mode == "For Teacher":
                     ("word-v2|" + draft_payload + repr(graph_fingerprint)).encode("utf-8")
                 ).hexdigest()
                 if st.session_state.get("setter_question_docx_signature") != question_docx_signature:
-                    st.session_state.setter_question_docx_bytes = build_setter_question_paper_docx(setter_draft)
+                    st.session_state.setter_question_docx_bytes = _run_document_job(
+                        build_setter_question_paper_docx, setter_draft
+                    )
                     st.session_state.setter_question_docx_signature = question_docx_signature
                 question_docx = st.session_state.setter_question_docx_bytes
                 downloads = st.columns(2 if include_scheme else 1)
@@ -10426,7 +10484,9 @@ if role_mode == "For Teacher":
                         ("scheme-v2|" + draft_payload).encode("utf-8")
                     ).hexdigest()
                     if st.session_state.get("setter_scheme_docx_signature") != scheme_docx_signature:
-                        st.session_state.setter_scheme_docx_bytes = build_setter_marking_scheme_docx(setter_draft)
+                        st.session_state.setter_scheme_docx_bytes = _run_document_job(
+                            build_setter_marking_scheme_docx, setter_draft
+                        )
                         st.session_state.setter_scheme_docx_signature = scheme_docx_signature
                     scheme_docx = st.session_state.setter_scheme_docx_bytes
                     downloads[1].download_button(
@@ -10641,7 +10701,8 @@ if role_mode == "For Teacher":
                                 paper_title=paper_title or os.path.splitext(paper_file.name)[0],
                                 solutions=solutions,
                             )
-                            docx_export = build_paper_solution_docx(
+                            docx_export = _run_document_job(
+                                build_paper_solution_docx,
                                 track_label=track_label,
                                 paper_title=paper_title or os.path.splitext(paper_file.name)[0],
                                 solutions=solutions,
@@ -11802,6 +11863,7 @@ def render_text_with_mathio(value: str) -> None:
 
 
 
+@st.cache_data(ttl=1800, max_entries=128, show_spinner=False)
 def _normalise_student_image_bytes(data: bytes) -> bytes | None:
     """Validate an uploaded/camera image and convert it to PNG for reliable export."""
     try:
@@ -11809,6 +11871,7 @@ def _normalise_student_image_bytes(data: bytes) -> bytes | None:
             return None
         with Image.open(BytesIO(data)) as image:
             image.load()
+            image.thumbnail((1800, 1800), Image.Resampling.LANCZOS)
             # Convert formats/modes that python-docx/reportlab may not embed reliably.
             if image.mode not in ("RGB", "RGBA"):
                 image = image.convert("RGB")
@@ -11841,6 +11904,30 @@ def _student_download_basename() -> str:
 
 def _student_notes():
     return st.session_state.setdefault("student_lesson_notes", [])
+
+
+def _saved_note_bytes(notes: list[dict] | None = None) -> int:
+    return sum(
+        len(item.get("content", b""))
+        for item in (notes if notes is not None else _student_notes())
+        if isinstance(item.get("content"), (bytes, bytearray))
+    )
+
+
+def _append_student_note(item: dict) -> tuple[bool, str]:
+    """Bound per-session notes so camera images cannot exhaust shared memory."""
+    notes = _student_notes()
+    if len(notes) >= MAX_SAVED_NOTES:
+        return False, "Download or clear the existing notes before saving more items."
+    content = item.get("content", b"")
+    extra = len(content) if isinstance(content, (bytes, bytearray)) else 0
+    if _saved_note_bytes(notes) + extra > MAX_SAVED_NOTE_BYTES:
+        return False, "Saved pictures have reached the 12 MB session limit. Download or clear the notes first."
+    notes.append(item)
+    st.session_state.pop("student_notes_export_signature", None)
+    st.session_state.pop("student_notes_docx_bytes", None)
+    st.session_state.pop("student_notes_pdf_bytes", None)
+    return True, ""
 
 
 
@@ -11996,13 +12083,16 @@ def _save_geometry_board_result(result, *, caption: str = "Geometry construction
     if save_id and st.session_state.get("_last_geometry_board_save_id") == save_id:
         return False
 
-    st.session_state.setdefault("student_lesson_notes", []).append({
+    saved, message = _append_student_note({
         "kind": "image",
         "content": image_bytes,
         "caption": caption,
         "mime_type": "image/png",
         "source_name": "geometry_construction.png",
     })
+    if not saved:
+        st.warning(message)
+        return False
     st.session_state["_last_geometry_board_save_id"] = save_id
     return True
 
@@ -12106,7 +12196,19 @@ def _student_notes_pdf():
 def _clear_student_notes_after_download():
     st.session_state.student_lesson_notes = []
     st.session_state.pop("student_note_draft", None)
+    for key in ("student_notes_export_signature", "student_notes_docx_bytes", "student_notes_pdf_bytes"):
+        st.session_state.pop(key, None)
     _reset_student_picture_inputs()
+
+
+def _student_notes_signature(notes: list[dict]) -> str:
+    digest = hashlib.sha256(b"student-notes-v2")
+    for item in notes:
+        digest.update(str(item.get("kind") or item.get("type") or "").encode("utf-8"))
+        digest.update(str(item.get("caption") or "").encode("utf-8"))
+        content = item.get("content", "")
+        digest.update(bytes(content) if isinstance(content, (bytes, bytearray)) else str(content).encode("utf-8"))
+    return digest.hexdigest()
 
 
 def _render_saved_student_notes_and_downloads() -> None:
@@ -12151,17 +12253,23 @@ def _render_saved_student_notes_and_downloads() -> None:
         "Download a copy when you are ready. Saved notes stay on screen until you clear them."
     )
     export_error = ""
-    try:
-        docx_data = _student_notes_docx()
-    except Exception as exc:
-        docx_data = None
-        export_error = f"Word export could not be prepared: {type(exc).__name__}: {exc}"
-    try:
-        pdf_data = _student_notes_pdf()
-    except Exception as exc:
-        pdf_data = None
+    export_signature = _student_notes_signature(notes)
+    if st.session_state.get("student_notes_export_signature") != export_signature:
+        try:
+            st.session_state.student_notes_docx_bytes = _run_document_job(_student_notes_docx)
+        except Exception as exc:
+            st.session_state.student_notes_docx_bytes = None
+            export_error = f"Word export could not be prepared: {type(exc).__name__}: {exc}"
+        try:
+            st.session_state.student_notes_pdf_bytes = _run_document_job(_student_notes_pdf)
+        except Exception as exc:
+            st.session_state.student_notes_pdf_bytes = None
+            if not export_error:
+                export_error = f"PDF export could not be prepared: {type(exc).__name__}: {exc}"
         if not export_error:
-            export_error = f"PDF export could not be prepared: {type(exc).__name__}: {exc}"
+            st.session_state.student_notes_export_signature = export_signature
+    docx_data = st.session_state.get("student_notes_docx_bytes")
+    pdf_data = st.session_state.get("student_notes_pdf_bytes")
     if export_error:
         st.warning(export_error)
 
@@ -12828,9 +12936,12 @@ if role_mode == "For Student":
         )
         if st.button("💾 Save note", key="student_save_note", use_container_width=True):
             if note_text.strip():
-                _student_notes().append({"kind": "text", "content": note_text.strip()})
-                st.session_state.pop("student_note_draft", None)
-                st.rerun()
+                saved, message = _append_student_note({"kind": "text", "content": note_text.strip()})
+                if saved:
+                    st.session_state.pop("student_note_draft", None)
+                    st.rerun()
+                else:
+                    st.warning(message)
 
         st.markdown("#### Handwrite lesson notes")
         st.caption(
@@ -12857,7 +12968,7 @@ if role_mode == "For Student":
                 if handwriting_png is None:
                     st.error("The handwritten note could not be saved. Please try again.")
                 else:
-                    _student_notes().append(
+                    saved, message = _append_student_note(
                         {
                             "kind": "image",
                             "content": handwriting_png,
@@ -12865,8 +12976,11 @@ if role_mode == "For Student":
                             "source_name": "ipad-handwritten-note.png",
                         }
                     )
-                    st.session_state.student_lesson_handwriting_version = handwriting_version + 1
-                    st.rerun()
+                    if saved:
+                        st.session_state.student_lesson_handwriting_version = handwriting_version + 1
+                        st.rerun()
+                    else:
+                        st.warning(message)
 
         # Keep the learning tools above the optional camera. A camera permission
         # prompt or slow mobile camera must never hide the core whiteboard tools.
@@ -12930,7 +13044,7 @@ if role_mode == "For Student":
                         "Please retake the picture or choose another PNG/JPG/WebP image."
                     )
                 else:
-                    _student_notes().append(
+                    saved, message = _append_student_note(
                         {
                             "kind": "image",
                             "content": image_bytes,
@@ -12938,9 +13052,12 @@ if role_mode == "For Student":
                             "source_name": str(getattr(chosen, "name", "") or ""),
                         }
                     )
-                    _reset_student_picture_inputs()
-                    st.success("Picture saved to the lesson notes.")
-                    st.rerun()
+                    if saved:
+                        _reset_student_picture_inputs()
+                        st.success("Picture saved to the lesson notes.")
+                        st.rerun()
+                    else:
+                        st.warning(message)
 st.caption(
         f"Educational tool, not an official SEAB/MOE product. Gemini default model: {DEFAULT_MODEL}. "
         "Generated questions are original and are not past-year examination questions."

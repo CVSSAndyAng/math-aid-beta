@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import base64
+import functools
 import os
 import re
+import threading
 from dataclasses import dataclass
 from typing import Literal
 
@@ -1332,6 +1334,63 @@ def get_model(explicit_model: str | None = None) -> str:
     return (explicit_model or os.getenv("GEMINI_MODEL") or DEFAULT_MODEL).strip()
 
 
+def _positive_int_env(name: str, default: int, *, minimum: int = 1, maximum: int = 100) -> int:
+    try:
+        return max(minimum, min(maximum, int(os.getenv(name, str(default)))))
+    except (TypeError, ValueError):
+        return default
+
+
+_GEMINI_MAX_ACTIVE = _positive_int_env("GEMINI_MAX_CONCURRENT_REQUESTS", 2, maximum=12)
+_GEMINI_MAX_WAITING = _positive_int_env("GEMINI_MAX_WAITING_REQUESTS", 12, maximum=100)
+_GEMINI_QUEUE_TIMEOUT = _positive_int_env("GEMINI_QUEUE_TIMEOUT_SECONDS", 75, maximum=300)
+_GEMINI_ACTIVE_SLOTS = threading.BoundedSemaphore(_GEMINI_MAX_ACTIVE)
+_GEMINI_WAITING_SLOTS = threading.BoundedSemaphore(_GEMINI_MAX_WAITING)
+
+
+class _QueuedInteractions:
+    """Bound Gemini concurrency so a whole class cannot exhaust the free API at once."""
+
+    def __init__(self, interactions):
+        self._interactions = interactions
+
+    def create(self, *args, **kwargs):
+        if not _GEMINI_WAITING_SLOTS.acquire(blocking=False):
+            raise GeminiTutorError(
+                "Gemini is currently helping several students. Use the offline practice and working tools now, then try again shortly.",
+                category="busy",
+            )
+        acquired_active = False
+        try:
+            acquired_active = _GEMINI_ACTIVE_SLOTS.acquire(timeout=_GEMINI_QUEUE_TIMEOUT)
+            if not acquired_active:
+                raise GeminiTutorError(
+                    "Gemini is still busy with earlier requests. No work was lost; please try again shortly.",
+                    category="busy",
+                )
+            return self._interactions.create(*args, **kwargs)
+        finally:
+            if acquired_active:
+                _GEMINI_ACTIVE_SLOTS.release()
+            _GEMINI_WAITING_SLOTS.release()
+
+
+class _QueuedGeminiClient:
+    def __init__(self, client):
+        self._client = client
+        self.interactions = _QueuedInteractions(client.interactions)
+
+    def __getattr__(self, name):
+        return getattr(self._client, name)
+
+
+@functools.lru_cache(maxsize=2)
+def _shared_native_client(key: str):
+    from google import genai
+
+    return genai.Client(api_key=key)
+
+
 def _make_client(api_key: str | None = None):
     try:
         from google import genai
@@ -1347,7 +1406,10 @@ def _make_client(api_key: str | None = None):
             "No Gemini API key was found. Add GEMINI_API_KEY in Streamlit Community Cloud Secrets, then restart the app.",
             category="auth",
         )
-    return genai.Client(api_key=key)
+    # The native client is safe to reuse and expensive connection setup should
+    # not be repeated on every Streamlit rerun. Every request still passes
+    # through the class-wide concurrency gate above.
+    return _QueuedGeminiClient(_shared_native_client(key))
 
 
 def _encode_asset(asset: UploadedAsset) -> dict[str, str]:
@@ -1445,6 +1507,8 @@ OUTPUT GUIDANCE
 
 
 def _translate_exception(exc: Exception) -> GeminiTutorError:
+    if isinstance(exc, GeminiTutorError):
+        return exc
     text = str(exc)
     low = text.lower()
     if "429" in low or "resource_exhausted" in low or "quota" in low or "rate limit" in low:
@@ -2092,6 +2156,61 @@ def audit_setter_diagrams(draft: ExamPaperDraft) -> list[str]:
             for ch in tang.group(1):
                 if ch not in labels:
                     issues.append(f"Question {q.question_number}: tangent line point {ch} missing")
+    return issues
+
+
+_GENERIC_TOPIC_WORDS = {
+    "and", "the", "of", "in", "with", "mathematics", "maths", "number",
+    "algebra", "geometry", "measurement", "statistics", "probability",
+    "calculus", "functions", "applications", "concepts", "chapter", "topic",
+    "equation", "equations", "theorem", "theorems",
+}
+
+
+def _topic_tokens(value: str) -> set[str]:
+    """Return stable topic roots, ignoring syllabus codes and broad strand labels."""
+    text = re.sub(r"^[A-Z]\d{2}\s*[·:.-]*\s*", "", str(value or "").strip(), flags=re.I)
+    roots: set[str] = set()
+    for token in re.findall(r"[a-z]+", text.lower()):
+        if token in _GENERIC_TOPIC_WORDS or len(token) < 4:
+            continue
+        canonical_prefixes = {
+            "binom": "binomial",
+            "circl": "circle",
+            "differen": "differentiate",
+            "integr": "integral",
+            "trigono": "trigonometry",
+            "transform": "transformation",
+            "probab": "probability",
+        }
+        for prefix, canonical in canonical_prefixes.items():
+            if token.startswith(prefix):
+                token = canonical
+                break
+        # Small deterministic stemming is enough for integrate/integration,
+        # differentiate/differentiation, inequalities, transformations, etc.
+        for suffix in ("ations", "ation", "ments", "ment", "ities", "ity", "ing", "ials", "ial", "ies", "es", "s"):
+            if token.endswith(suffix) and len(token) - len(suffix) >= 5:
+                token = token[: -len(suffix)]
+                break
+        roots.add(token[:10])
+    return roots
+
+
+def audit_setter_topic_alignment(draft: ExamPaperDraft, selected_topics: list[str]) -> list[str]:
+    """Reject questions whose declared topic is outside the teacher's selection."""
+    selected = [(label, _topic_tokens(label)) for label in selected_topics if str(label).strip()]
+    if not selected:
+        return []
+    issues: list[str] = []
+    for question in draft.questions:
+        actual = _topic_tokens(question.topic)
+        if actual and any(actual & expected for _, expected in selected):
+            continue
+        allowed = ", ".join(label for label, _ in selected)
+        issues.append(
+            f"Question {question.question_number}: declared topic '{question.topic}' does not match the selected topic(s): {allowed}"
+        )
     return issues
 
 
@@ -2849,15 +2968,18 @@ Return JSON matching the supplied schema only.
     mark_notes = reconcile_marks(result)
     _, mark_issues = audit_marks(result)
     diagram_issues = audit_setter_diagrams(result)
+    topic_issues = audit_setter_topic_alignment(result, topics)
 
-    # Ask Gemini once more to repair any genuinely structural or diagram mismatch.
+    # Ask Gemini once more to repair any genuinely structural, topic, or diagram mismatch.
     # Mark allocation itself is already handled locally.
-    issues = mark_issues + diagram_issues
+    issues = mark_issues + topic_issues + diagram_issues
     if issues:
         correction = (
-            "Correct ONLY the remaining structural, mark-allocation, or diagram-consistency problems below. "
+            "Correct ONLY the remaining structural, selected-topic, mark-allocation, or diagram-consistency problems below. "
             "The overall requested mark total is authoritative, but the distribution of marks between questions "
             "and parts is flexible. Preserve valid questions, wording and numbering. "
+            "Any topic-mismatched question must be replaced by a fresh question that directly tests one of the selected topics; "
+            "do not merely relabel an unrelated question. "
             "For each diagram issue, rebuild the scene so it exactly matches the named points, circles, tangents, "
             "chords, intersections, functions and solids in the question. "
             "If you cannot construct a reliable diagram, set both diagram_scene_2d and diagram_scene_3d to null "
@@ -2873,6 +2995,7 @@ Return JSON matching the supplied schema only.
         mark_notes.extend(reconcile_marks(result))
         _, mark_issues = audit_marks(result)
         diagram_issues = audit_setter_diagrams(result)
+        topic_issues = audit_setter_topic_alignment(result, topics)
 
     # Targeted question-count recovery. A missing main question should not force
     # the teacher to regenerate an otherwise-valid full paper.
@@ -2883,6 +3006,7 @@ Return JSON matching the supplied schema only.
             mark_notes.extend(reconcile_marks(result))
             _, mark_issues = audit_marks(result)
             diagram_issues = audit_setter_diagrams(result)
+            topic_issues = audit_setter_topic_alignment(result, topics)
         except Exception as exc:
             question_count_notes.append(
                 "Automatic missing-question recovery was attempted but did not complete: "
@@ -2937,11 +3061,12 @@ Return JSON matching the supplied schema only.
     # Number-of-question/duplicate-number failures remain strict.
     blocking_issues = [
         issue
-        for issue in remaining_mark_issues
+        for issue in (remaining_mark_issues + topic_issues)
         if (
             issue.startswith("Duplicate question number")
             or issue.startswith("Generated ")
             or "has no question parts" in issue
+            or "does not match the selected topic" in issue
         )
     ]
 
