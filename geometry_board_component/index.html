@@ -121,7 +121,7 @@ const compassRadiusInput=document.getElementById("compassRadius");
 
 let cssW=0,cssH=0,dpr=1,tool="pen",pointerDown=false;
 let sx=0,sy=0,baseImage=null,history=[],grid=false,linePreview=null;
-let segments=[],selectedSegment=-1,moveStart=null,moveOriginal=null;
+let segments=[],selectedSegment=-1,moveStart=null,moveOriginal=null,moveAction=null;
 
 let compass={
   visible:false,
@@ -218,6 +218,17 @@ function hitSegment(x,y,tolerance=14){
   return best
 }
 
+function rotationHandle(s){
+  const mx=(s.x1+s.x2)/2,my=(s.y1+s.y2)/2;
+  const dx=s.x2-s.x1,dy=s.y2-s.y1,len=Math.max(1,Math.hypot(dx,dy));
+  return {x:mx-dy/len*34,y:my+dx/len*34,mx,my}
+}
+
+function hitRotationHandle(x,y,s){
+  const h=rotationHandle(s);
+  return Math.hypot(x-h.x,y-h.y)<=16
+}
+
 function drawSegments(){
   segments.forEach((s,index)=>{
     ctx.save();
@@ -227,6 +238,14 @@ function drawSegments(){
     if(s.label){
       ctx.font="13px Arial";ctx.fillStyle="#222";
       ctx.fillText(s.label,(s.x1+s.x2)/2+8,(s.y1+s.y2)/2-8)
+    }
+    if(index===selectedSegment&&tool==="move"){
+      const h=rotationHandle(s);
+      ctx.setLineDash([4,4]);ctx.strokeStyle="#7b6de3";ctx.lineWidth=1.5;
+      ctx.beginPath();ctx.moveTo(h.mx,h.my);ctx.lineTo(h.x,h.y);ctx.stroke();ctx.setLineDash([]);
+      ctx.fillStyle="#fff";ctx.strokeStyle="#5f61df";ctx.lineWidth=2;
+      ctx.beginPath();ctx.arc(h.x,h.y,10,0,Math.PI*2);ctx.fill();ctx.stroke();
+      ctx.fillStyle="#5f61df";ctx.font="bold 13px Arial";ctx.fillText("↻",h.x-6,h.y+5)
     }
     ctx.restore()
   })
@@ -381,7 +400,7 @@ function setTool(t){
       pen:"Pencil — Apple Pencil, touch or mouse",
       line:"Line — optionally type an exact length, then drag to choose direction",
       ruler:"Ruler — drag between two points",
-      move:"Move — select and drag a line or ruler line to reposition it",
+      move:"Move — drag a line to reposition it; drag its ↻ handle to rotate it",
       eraser:"Eraser — drag over unwanted working"
     }[t]||t
   }
@@ -426,15 +445,25 @@ function pointerStart(e){
   const [x,y]=pos(e);
 
   if(tool==="move"){
-    const index=hitSegment(x,y);
+    const rotateExisting=selectedSegment>=0&&hitRotationHandle(x,y,segments[selectedSegment]);
+    const index=rotateExisting?selectedSegment:hitSegment(x,y);
     selectedSegment=index;
     if(index>=0){
       remember();pointerDown=true;moveStart={x,y};moveOriginal={...segments[index]};
+      moveAction=rotateExisting?"rotate":"translate";
+      if(moveAction==="rotate"){
+        const h=rotationHandle(moveOriginal);
+        moveStart.angle=Math.atan2(y-h.my,x-h.mx);
+        moveStart.lineAngle=Math.atan2(moveOriginal.y2-moveOriginal.y1,moveOriginal.x2-moveOriginal.x1)
+      }
       canvas.setPointerCapture?.(e.pointerId);
-      canvas.style.cursor="grabbing";
-      statusEl.textContent="Move — drag the selected line; its length and angle are preserved"
+      canvas.style.cursor=moveAction==="rotate"?"alias":"grabbing";
+      statusEl.textContent=moveAction==="rotate"
+        ?"Move — rotate around the midpoint; line length is preserved"
+        :"Move — reposition the selected line; its length and angle are preserved"
     }else{
-      statusEl.textContent="Move — tap a line made with Line or Ruler, then drag it"
+      moveAction=null;
+      statusEl.textContent="Move — tap a Line/Ruler line, then drag the line or its ↻ handle"
     }
     redrawOverlay();return
   }
@@ -475,11 +504,22 @@ function pointerMove(e){
   const [x,y]=pos(e);
 
   if(tool==="move"&&selectedSegment>=0&&moveStart&&moveOriginal){
-    const dx=x-moveStart.x,dy=y-moveStart.y,s=segments[selectedSegment];
-    s.x1=moveOriginal.x1+dx;s.y1=moveOriginal.y1+dy;
-    s.x2=moveOriginal.x2+dx;s.y2=moveOriginal.y2+dy;
+    const s=segments[selectedSegment];
+    if(moveAction==="rotate"){
+      const h=rotationHandle(moveOriginal);
+      const angle=moveStart.lineAngle+Math.atan2(y-h.my,x-h.mx)-moveStart.angle;
+      const half=Math.hypot(moveOriginal.x2-moveOriginal.x1,moveOriginal.y2-moveOriginal.y1)/2;
+      s.x1=h.mx-half*Math.cos(angle);s.y1=h.my-half*Math.sin(angle);
+      s.x2=h.mx+half*Math.cos(angle);s.y2=h.my+half*Math.sin(angle)
+    }else{
+      const dx=x-moveStart.x,dy=y-moveStart.y;
+      s.x1=moveOriginal.x1+dx;s.y1=moveOriginal.y1+dy;
+      s.x2=moveOriginal.x2+dx;s.y2=moveOriginal.y2+dy
+    }
     const units=Math.hypot(s.x2-s.x1,s.y2-s.y1)/20;
-    measureEl.textContent="Line length: "+units.toFixed(1)+" units";
+    let degrees=Math.atan2(s.y2-s.y1,s.x2-s.x1)*180/Math.PI;
+    if(degrees<0)degrees+=180;if(degrees>=180)degrees-=180;
+    measureEl.textContent="Length: "+units.toFixed(1)+" units · angle: "+degrees.toFixed(1)+"°";
     redrawOverlay();return
   }
 
@@ -552,8 +592,11 @@ function pointerEnd(e){
     linePreview=null;redrawOverlay()
   }
   if(tool==="move"){
-    moveStart=null;moveOriginal=null;canvas.style.cursor="grab";
-    statusEl.textContent=selectedSegment>=0?"Move — line repositioned; drag it again or select another line":"Move — select a line"
+    const completedAction=moveAction;
+    moveStart=null;moveOriginal=null;moveAction=null;canvas.style.cursor="grab";
+    statusEl.textContent=selectedSegment>=0
+      ?(completedAction==="rotate"?"Move — line rotated; use ↻ again or drag the line to reposition it":"Move — line repositioned; use ↻ to rotate it")
+      :"Move — select a line"
   }
   if(tool==="compass")compass.dragging=null;
   if(tool==="protractor")protractor.dragging=null
