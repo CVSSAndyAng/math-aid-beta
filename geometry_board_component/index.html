@@ -73,6 +73,7 @@ canvas{position:absolute;inset:0;width:100%;height:100%;touch-action:none;cursor
     <button class="tool" data-tool="compass"><span class="ico">🧭</span><span>Compass</span></button>
     <button class="tool" data-tool="protractor"><span class="ico">◒</span><span>Protractor</span></button>
     <button class="tool" data-tool="ruler"><span class="ico">📏</span><span>Ruler</span></button>
+    <button class="tool" data-tool="move"><span class="ico">✥</span><span>Move</span></button>
     <button class="tool" data-tool="eraser"><span class="ico">⌫</span><span>Eraser</span></button>
     <button class="tool secondary" data-action="undo"><span class="ico">↶</span><span>Undo</span></button>
     <button class="tool secondary" data-action="clear"><span class="ico">CLR</span><span>Clear</span></button>
@@ -120,6 +121,7 @@ const compassRadiusInput=document.getElementById("compassRadius");
 
 let cssW=0,cssH=0,dpr=1,tool="pen",pointerDown=false;
 let sx=0,sy=0,baseImage=null,history=[],grid=false,linePreview=null;
+let segments=[],selectedSegment=-1,moveStart=null,moveOriginal=null;
 
 let compass={
   visible:false,
@@ -160,10 +162,19 @@ new ResizeObserver(()=>resizeCanvas(true)).observe(wrap);
 
 function pos(e){const r=canvas.getBoundingClientRect();return[e.clientX-r.left,e.clientY-r.top]}
 function dist(x1,y1,x2,y2){return Math.hypot(x2-x1,y2-y1)}
-function remember(){history.push(drawingCanvas.toDataURL("image/png"));if(history.length>30)history.shift()}
-function restore(data,after=null){
+function remember(){
+  history.push({image:drawingCanvas.toDataURL("image/png"),segments:segments.map(s=>({...s}))});
+  if(history.length>30)history.shift()
+}
+function restore(snapshot,after=null){
+  const data=typeof snapshot==="string"?snapshot:snapshot.image;
   const im=new Image();
-  im.onload=()=>{dctx.clearRect(0,0,cssW,cssH);dctx.drawImage(im,0,0,cssW,cssH);if(after)after();else redrawOverlay()};
+  im.onload=()=>{
+    dctx.clearRect(0,0,cssW,cssH);dctx.drawImage(im,0,0,cssW,cssH);
+    segments=Array.isArray(snapshot?.segments)?snapshot.segments.map(s=>({...s})):segments;
+    selectedSegment=-1;
+    if(after)after();else redrawOverlay()
+  };
   im.src=data
 }
 function angleNorm(a){while(a<0)a+=Math.PI*2;while(a>=Math.PI*2)a-=Math.PI*2;return a}
@@ -192,6 +203,40 @@ function drawGridOverlay(){
   for(let x=20;x<cssW;x+=20){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,cssH);ctx.stroke()}
   for(let y=20;y<cssH;y+=20){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(cssW,y);ctx.stroke()}
   ctx.restore()
+}
+
+function pointSegmentDistance(px,py,s){
+  const vx=s.x2-s.x1,vy=s.y2-s.y1,wx=px-s.x1,wy=py-s.y1;
+  const vv=vx*vx+vy*vy;
+  const t=vv>0?Math.max(0,Math.min(1,(wx*vx+wy*vy)/vv)):0;
+  return Math.hypot(px-(s.x1+t*vx),py-(s.y1+t*vy))
+}
+
+function hitSegment(x,y,tolerance=14){
+  let best=-1,bestDistance=tolerance;
+  segments.forEach((s,index)=>{const d=pointSegmentDistance(x,y,s);if(d<=bestDistance){best=index;bestDistance=d}});
+  return best
+}
+
+function drawSegments(){
+  segments.forEach((s,index)=>{
+    ctx.save();
+    ctx.strokeStyle=index===selectedSegment&&tool==="move"?"#5f61df":"#222";
+    ctx.lineWidth=index===selectedSegment&&tool==="move"?4:2;
+    ctx.beginPath();ctx.moveTo(s.x1,s.y1);ctx.lineTo(s.x2,s.y2);ctx.stroke();
+    if(s.label){
+      ctx.font="13px Arial";ctx.fillStyle="#222";
+      ctx.fillText(s.label,(s.x1+s.x2)/2+8,(s.y1+s.y2)/2-8)
+    }
+    ctx.restore()
+  })
+}
+
+function eraseSegmentsAt(x,y){
+  const before=segments.length;
+  segments=segments.filter(s=>pointSegmentDistance(x,y,s)>12);
+  if(selectedSegment>=segments.length)selectedSegment=-1;
+  return segments.length!==before
 }
 
 function drawCompass(){
@@ -301,6 +346,7 @@ function drawProtractor(){
 function redrawOverlay(){
   ctx.clearRect(0,0,cssW,cssH);
   ctx.drawImage(drawingCanvas,0,0,cssW,cssH);
+  drawSegments();
   if(grid)drawGridOverlay();
   if(linePreview){
     ctx.save();ctx.strokeStyle="#222";ctx.lineWidth=2;
@@ -314,6 +360,8 @@ function setTool(t){
   if(tool===t && (t==="compass"||t==="protractor"))t="pen";
   tool=t;
   linePreview=null;
+  if(t!=="move")selectedSegment=-1;
+  canvas.style.cursor=t==="move"?"grab":"crosshair";
   document.querySelectorAll("[data-tool]").forEach(b=>b.classList.toggle("active",b.dataset.tool===t));
   compass.visible=t==="compass";
   protractor.visible=t==="protractor";
@@ -333,6 +381,7 @@ function setTool(t){
       pen:"Pencil — Apple Pencil, touch or mouse",
       line:"Line — optionally type an exact length, then drag to choose direction",
       ruler:"Ruler — drag between two points",
+      move:"Move — select and drag a line or ruler line to reposition it",
       eraser:"Eraser — drag over unwanted working"
     }[t]||t
   }
@@ -376,6 +425,20 @@ function pointerStart(e){
   e.preventDefault();
   const [x,y]=pos(e);
 
+  if(tool==="move"){
+    const index=hitSegment(x,y);
+    selectedSegment=index;
+    if(index>=0){
+      remember();pointerDown=true;moveStart={x,y};moveOriginal={...segments[index]};
+      canvas.setPointerCapture?.(e.pointerId);
+      canvas.style.cursor="grabbing";
+      statusEl.textContent="Move — drag the selected line; its length and angle are preserved"
+    }else{
+      statusEl.textContent="Move — tap a line made with Line or Ruler, then drag it"
+    }
+    redrawOverlay();return
+  }
+
   if(tool==="compass"){
     const h=hitCompass(x,y);
     if(h){
@@ -387,27 +450,38 @@ function pointerStart(e){
         compass.sweepStart=Math.atan2(pencil[1]-needle[1],pencil[0]-needle[0]);
         compass.sweepLast=compass.sweepStart
       }
-      pointerDown=true;return
+      pointerDown=true;canvas.setPointerCapture?.(e.pointerId);return
     }
   }
 
   if(tool==="protractor"){
     const h=hitProtractor(x,y);
     if(h){
-      remember();protractor.dragging=h;pointerDown=true;
+      remember();protractor.dragging=h;pointerDown=true;canvas.setPointerCapture?.(e.pointerId);
       if(h==="ray")protractor.rayAngle=Math.atan2(y-protractor.cy,x-protractor.cx);
       return
     }
   }
 
   remember();pointerDown=true;[sx,sy]=[x,y];baseImage=drawingCanvas.toDataURL("image/png");
+  canvas.setPointerCapture?.(e.pointerId);
   if(tool==="pen"||tool==="eraser"){dctx.beginPath();dctx.moveTo(sx,sy)}
+  if(tool==="eraser"&&eraseSegmentsAt(x,y))redrawOverlay()
 }
 
 function pointerMove(e){
   if(!pointerDown)return;
   e.preventDefault();
   const [x,y]=pos(e);
+
+  if(tool==="move"&&selectedSegment>=0&&moveStart&&moveOriginal){
+    const dx=x-moveStart.x,dy=y-moveStart.y,s=segments[selectedSegment];
+    s.x1=moveOriginal.x1+dx;s.y1=moveOriginal.y1+dy;
+    s.x2=moveOriginal.x2+dx;s.y2=moveOriginal.y2+dy;
+    const units=Math.hypot(s.x2-s.x1,s.y2-s.y1)/20;
+    measureEl.textContent="Line length: "+units.toFixed(1)+" units";
+    redrawOverlay();return
+  }
 
   if(tool==="compass" && compass.dragging){
     const c=compass;
@@ -448,7 +522,9 @@ function pointerMove(e){
     dctx.save();dctx.strokeStyle=tool==="eraser"?"#fffdf0":"#222";
     const pressure=(e.pressure&&e.pressure>0)?e.pressure:.5;
     dctx.lineWidth=tool==="eraser"?20:Math.max(1.5,1.3+pressure*2.3);
-    dctx.lineTo(x,y);dctx.stroke();dctx.restore();redrawOverlay();return
+    dctx.lineTo(x,y);dctx.stroke();dctx.restore();
+    if(tool==="eraser")eraseSegmentsAt(x,y);
+    redrawOverlay();return
   }
 
   if(tool==="line"||tool==="ruler"){
@@ -469,15 +545,15 @@ function pointerMove(e){
 function pointerEnd(e){
   if(!pointerDown)return;
   pointerDown=false;
+  try{canvas.releasePointerCapture?.(e.pointerId)}catch(_){}
   if((tool==="line"||tool==="ruler")&&linePreview){
-    dctx.save();dctx.strokeStyle="#222";dctx.lineWidth=2;
-    dctx.beginPath();dctx.moveTo(linePreview.x1,linePreview.y1);dctx.lineTo(linePreview.x2,linePreview.y2);dctx.stroke();
-    if(tool==="ruler"){
-      const px=Math.hypot(linePreview.x2-linePreview.x1,linePreview.y2-linePreview.y1);
-      dctx.font="13px Arial";dctx.fillStyle="#222";
-      dctx.fillText((px/20).toFixed(1)+" units",(linePreview.x1+linePreview.x2)/2+8,(linePreview.y1+linePreview.y2)/2-8)
-    }
-    dctx.restore();linePreview=null;redrawOverlay()
+    const px=Math.hypot(linePreview.x2-linePreview.x1,linePreview.y2-linePreview.y1);
+    segments.push({...linePreview,label:tool==="ruler"?(px/20).toFixed(1)+" units":""});
+    linePreview=null;redrawOverlay()
+  }
+  if(tool==="move"){
+    moveStart=null;moveOriginal=null;canvas.style.cursor="grab";
+    statusEl.textContent=selectedSegment>=0?"Move — line repositioned; drag it again or select another line":"Move — select a line"
   }
   if(tool==="compass")compass.dragging=null;
   if(tool==="protractor")protractor.dragging=null
@@ -490,7 +566,7 @@ canvas.addEventListener("pointercancel",pointerEnd,{passive:false});
 
 document.querySelector('[data-action="undo"]').addEventListener("click",()=>{if(history.length)restore(history.pop(),redrawOverlay)});
 document.querySelector('[data-action="clear"]').addEventListener("click",()=>{
-  remember();dctx.clearRect(0,0,cssW,cssH);linePreview=null;redrawOverlay();measureEl.textContent=""
+  remember();dctx.clearRect(0,0,cssW,cssH);segments=[];selectedSegment=-1;linePreview=null;redrawOverlay();measureEl.textContent=""
 });
 compassRadiusInput.addEventListener("change",()=>setCompassRadius(Number.parseFloat(compassRadiusInput.value)));
 compassRadiusInput.addEventListener("keydown",e=>{if(e.key==="Enter"){e.preventDefault();setCompassRadius(Number.parseFloat(compassRadiusInput.value));canvas.focus()}});
@@ -500,7 +576,9 @@ document.getElementById("gridBtn").addEventListener("click",()=>{
 });
 document.getElementById("saveBtn").addEventListener("click",()=>{
   // Save only the student's drawing plus currently visible construction instruments.
+  const previousSelection=selectedSegment;selectedSegment=-1;redrawOverlay();
   const value={kind:"geometry_board_png",data_url:canvas.toDataURL("image/png"),saved_at:Date.now()};
+  selectedSegment=previousSelection;redrawOverlay();
   Streamlit.setComponentValue(value);statusEl.textContent="Saved to lesson notes"
 });
 
