@@ -12064,7 +12064,7 @@ _GEOMETRY_BOARD_HTML = _GEOMETRY_BOARD_SOURCE.read_text(encoding="utf-8")
 
 def _prepare_geometry_board_frontend() -> Path:
     """Materialise the embedded component in a writable runtime directory."""
-    runtime_dir = Path(tempfile.gettempdir()) / "math_buddy_geometry_board_component_v7"
+    runtime_dir = Path(tempfile.gettempdir()) / "math_buddy_geometry_board_component_v8"
     runtime_dir.mkdir(parents=True, exist_ok=True)
     index_file = runtime_dir / "index.html"
     try:
@@ -12078,7 +12078,7 @@ def _prepare_geometry_board_frontend() -> Path:
 
 _GEOMETRY_BOARD_FRONTEND = _prepare_geometry_board_frontend()
 _geometry_board_component = st_components_v1.declare_component(
-    "math_buddy_geometry_board_v7",
+    "math_buddy_geometry_board_v8",
     path=str(_GEOMETRY_BOARD_FRONTEND),
 )
 
@@ -13028,7 +13028,8 @@ if role_mode == "For Student":
             st.caption(
                 "Use Apple Pencil, touch or mouse. Choose Pencil, Line, Compass, Protractor, "
                 "Ruler, Move or Eraser from the labelled toolbar. Move repositions lines made "
-                "with Line or Ruler. Press Save to notes when finished."
+                "with Line or Ruler; drag the ↻ handle to rotate a selected line. "
+                "Press Save to notes when finished."
             )
             geometry_board_result = _geometry_working_board(
                 key="student_lesson_geometry_board",
