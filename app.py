@@ -2063,7 +2063,7 @@ export default function(component) {
   const clearButton = parentElement.querySelector('.omt-clear-pad');
   const saveButton = parentElement.querySelector('.omt-save-pad');
   const status = parentElement.querySelector('.omt-handwriting-status');
-  const ctx = canvas.getContext('2d', { alpha:false, desynchronized:true });
+  const ctx = canvas.getContext('2d');
 
   // Important: setStateValue() causes a Streamlit rerun. Therefore it is only
   // called when the student taps Save handwriting, never at pointer-up.
@@ -2086,6 +2086,7 @@ export default function(component) {
     ctx.save();
     ctx.setTransform(1,0,0,1,0,0);
     ctx.globalCompositeOperation = 'source-over';
+    ctx.clearRect(0,0,canvas.width,canvas.height);
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0,0,canvas.width,canvas.height);
     ctx.restore();
@@ -2139,7 +2140,18 @@ export default function(component) {
     const r = canvas.getBoundingClientRect();
     const scaleX = canvas.width / Math.max(1, r.width);
     const scaleY = canvas.height / Math.max(1, r.height);
-    return [(ev.clientX-r.left)*scaleX, (ev.clientY-r.top)*scaleY];
+    const rawX = Number.isFinite(ev.clientX) ? (ev.clientX-r.left)*scaleX : 0;
+    const rawY = Number.isFinite(ev.clientY) ? (ev.clientY-r.top)*scaleY : 0;
+    return [
+      Math.max(0,Math.min(canvas.width,rawX)),
+      Math.max(0,Math.min(canvas.height,rawY))
+    ];
+  };
+
+  const penWidth = (ev) => {
+    const raw = Number.isFinite(ev.pressure) && ev.pressure > 0 ? ev.pressure : 0.5;
+    const pressure = Math.max(0.1,Math.min(1,raw));
+    return (1.9 + pressure * 2.7) * pixelRatio;
   };
 
   const drawEvent = (ev) => {
@@ -2147,7 +2159,6 @@ export default function(component) {
     const events = coalesced && coalesced.length ? coalesced : [ev];
     for (const e of events) {
       const [x,y] = point(e);
-      const pressure = e.pressure && e.pressure > 0 ? e.pressure : 0.5;
       ctx.beginPath();
       ctx.moveTo(lastX,lastY);
       ctx.lineTo(x,y);
@@ -2155,7 +2166,7 @@ export default function(component) {
       ctx.strokeStyle = '#111111';
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
-      ctx.lineWidth = (1.9 + pressure * 2.7) * pixelRatio;
+      ctx.lineWidth = penWidth(e);
       ctx.stroke();
       ctx.closePath();
       lastX=x; lastY=y;
@@ -2169,12 +2180,15 @@ export default function(component) {
     drawing = true; hasInk = true; dirty = true;
     canvas.setPointerCapture?.(ev.pointerId);
     [lastX,lastY] = point(ev);
-    const pressure = ev.pressure && ev.pressure > 0 ? ev.pressure : 0.5;
-    const radius = Math.max(1.4, (1.2 + pressure * 1.4) * pixelRatio);
+    // A microscopic stroked segment makes a tap visible without using fill(),
+    // which caused a full-canvas black fill in some accelerated browsers.
     ctx.beginPath();
-    ctx.fillStyle = '#111111';
-    ctx.arc(lastX,lastY,radius,0,Math.PI*2);
-    ctx.fill();
+    ctx.moveTo(lastX,lastY);
+    ctx.lineTo(lastX + Math.max(0.01,pixelRatio * 0.02),lastY);
+    ctx.strokeStyle = '#111111';
+    ctx.lineCap = 'round';
+    ctx.lineWidth = penWidth(ev);
+    ctx.stroke();
     ctx.closePath();
     status.textContent = 'Writing… tap Save handwriting when the page is complete.';
   };
@@ -2228,7 +2242,7 @@ export default function(component) {
 
 try:
     _handwriting_component = st.components.v2.component(
-        "omt_handwriting_pad_v2",
+        "omt_handwriting_pad_v3",
         html=_HANDWRITING_HTML,
         css=_HANDWRITING_CSS,
         js=_HANDWRITING_JS,
@@ -12050,7 +12064,7 @@ _GEOMETRY_BOARD_HTML = _GEOMETRY_BOARD_SOURCE.read_text(encoding="utf-8")
 
 def _prepare_geometry_board_frontend() -> Path:
     """Materialise the embedded component in a writable runtime directory."""
-    runtime_dir = Path(tempfile.gettempdir()) / "math_buddy_geometry_board_component_v6"
+    runtime_dir = Path(tempfile.gettempdir()) / "math_buddy_geometry_board_component_v7"
     runtime_dir.mkdir(parents=True, exist_ok=True)
     index_file = runtime_dir / "index.html"
     try:
@@ -12064,7 +12078,7 @@ def _prepare_geometry_board_frontend() -> Path:
 
 _GEOMETRY_BOARD_FRONTEND = _prepare_geometry_board_frontend()
 _geometry_board_component = st_components_v1.declare_component(
-    "math_buddy_geometry_board_v6",
+    "math_buddy_geometry_board_v7",
     path=str(_GEOMETRY_BOARD_FRONTEND),
 )
 
@@ -13013,7 +13027,8 @@ if role_mode == "For Student":
         with st.expander("📐 Geometry construction board", expanded=False):
             st.caption(
                 "Use Apple Pencil, touch or mouse. Choose Pencil, Line, Compass, Protractor, "
-                "Ruler or Eraser from the labelled toolbar. Press Save to notes when finished."
+                "Ruler, Move or Eraser from the labelled toolbar. Move repositions lines made "
+                "with Line or Ruler. Press Save to notes when finished."
             )
             geometry_board_result = _geometry_working_board(
                 key="student_lesson_geometry_board",
