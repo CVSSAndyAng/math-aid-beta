@@ -376,22 +376,34 @@ function redrawOverlay(){
 }
 
 function setTool(t){
-  if(tool===t && (t==="compass"||t==="protractor"))t="pen";
-  tool=t;
+  if(t==="protractor"){
+    if(protractor.visible){
+      protractor.visible=false;protractor.dragging=null;
+      if(tool==="protractor")tool="pen"
+    }else{
+      protractor.visible=true;tool="protractor"
+    }
+  }else{
+    if(tool===t&&t==="compass")t="pen";
+    tool=t
+  }
   linePreview=null;
-  if(t!=="move")selectedSegment=-1;
-  canvas.style.cursor=t==="move"?"grab":"crosshair";
-  document.querySelectorAll("[data-tool]").forEach(b=>b.classList.toggle("active",b.dataset.tool===t));
-  compass.visible=t==="compass";
-  protractor.visible=t==="protractor";
+  if(tool!=="move")selectedSegment=-1;
+  canvas.style.cursor=tool==="move"?"grab":"crosshair";
+  document.querySelectorAll("[data-tool]").forEach(b=>{
+    const active=b.dataset.tool==="protractor"?protractor.visible:b.dataset.tool===tool;
+    b.classList.toggle("active",active);b.setAttribute("aria-pressed",active?"true":"false");
+    if(b.dataset.tool==="protractor")b.querySelector("span:last-child").textContent=protractor.visible?"Protractor ✓":"Protractor"
+  });
+  compass.visible=tool==="compass";
   measureEl.textContent="";
-  hintEl.style.display=(t==="compass"||t==="protractor")?"block":"none";
-  lengthControl.classList.toggle("visible",t==="line"||t==="ruler");
-  radiusControl.classList.toggle("visible",t==="compass");
-  if(t==="compass"){
+  hintEl.style.display=(tool==="compass"||(tool==="protractor"&&protractor.visible))?"block":"none";
+  lengthControl.classList.toggle("visible",tool==="line"||tool==="ruler");
+  radiusControl.classList.toggle("visible",tool==="compass");
+  if(tool==="compass"){
     statusEl.textContent="Compass — type a radius or adjust the white handle; drag hinge to move; drag pencil tip to draw an arc";
     hintEl.textContent="Compass: set radius above • hinge = move • pencil tip = sweep arc"
-  }else if(t==="protractor"){
+  }else if(tool==="protractor"&&protractor.visible){
     statusEl.textContent="Protractor — drag its body to move; drag top handle to rotate; drag from centre to place/read a ray";
     hintEl.textContent="Protractor: body = move • top handle = rotate • centre = measure/draw ray"
   }else{
@@ -402,7 +414,7 @@ function setTool(t){
       ruler:"Ruler — drag between two points",
       move:"Move — drag a line to reposition it; drag its ↻ handle to rotate it",
       eraser:"Eraser — drag over unwanted working"
-    }[t]||t
+    }[tool]||tool
   }
   baseImage=drawingCanvas.toDataURL("image/png");
   redrawOverlay()
