@@ -12064,7 +12064,7 @@ _GEOMETRY_BOARD_HTML = _GEOMETRY_BOARD_SOURCE.read_text(encoding="utf-8")
 
 def _prepare_geometry_board_frontend() -> Path:
     """Materialise the embedded component in a writable runtime directory."""
-    runtime_dir = Path(tempfile.gettempdir()) / "math_buddy_geometry_board_component_v10"
+    runtime_dir = Path(tempfile.gettempdir()) / "math_buddy_geometry_board_component_v11"
     runtime_dir.mkdir(parents=True, exist_ok=True)
     index_file = runtime_dir / "index.html"
     try:
@@ -12078,7 +12078,7 @@ def _prepare_geometry_board_frontend() -> Path:
 
 _GEOMETRY_BOARD_FRONTEND = _prepare_geometry_board_frontend()
 _geometry_board_component = st_components_v1.declare_component(
-    "math_buddy_geometry_board_v10",
+    "math_buddy_geometry_board_v11",
     path=str(_GEOMETRY_BOARD_FRONTEND),
 )
 
@@ -13030,6 +13030,7 @@ if role_mode == "For Student":
                 "Ruler, Move or Eraser from the labelled toolbar. The numbered Ruler can be "
                 "moved by its body and rotated with its ↻ handle. Move repositions lines made "
                 "with Line; drag the line's ↻ handle to rotate it. "
+                "Compass radius is the marked distance from its needle/arc centre to its pencil tip. "
                 "The protractor stays visible while other tools are used; click Protractor ✓ to hide it. "
                 "Press Save to notes when finished."
             )
