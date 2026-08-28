@@ -2075,39 +2075,39 @@ export default function(component) {
   let history = [];
   const restoreData = validPng(data?.image_data_url) ? data.image_data_url : '';
 
+  let pixelRatio = 1;
+
   const cssSize = () => {
     const r = canvas.getBoundingClientRect();
     return { w: Math.max(1, r.width), h: Math.max(1, r.height) };
   };
 
   const paintWhite = () => {
-    const { w, h } = cssSize();
     ctx.save();
     ctx.setTransform(1,0,0,1,0,0);
-    ctx.fillStyle = '#fff';
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = '#ffffff';
     ctx.fillRect(0,0,canvas.width,canvas.height);
     ctx.restore();
-    ctx.fillStyle = '#fff';
-    ctx.fillRect(0,0,w,h);
   };
 
   const configureCanvasOnce = () => {
     const { w, h } = cssSize();
-    const ratio = Math.max(1, Math.min(window.devicePixelRatio || 1, 2));
-    canvas.width = Math.max(1, Math.round(w * ratio));
-    canvas.height = Math.max(1, Math.round(h * ratio));
-    ctx.setTransform(ratio,0,0,ratio,0,0);
+    pixelRatio = Math.max(1, Math.min(window.devicePixelRatio || 1, 2));
+    canvas.width = Math.max(1, Math.round(w * pixelRatio));
+    canvas.height = Math.max(1, Math.round(h * pixelRatio));
+    ctx.setTransform(1,0,0,1,0,0);
+    ctx.globalCompositeOperation = 'source-over';
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
-    ctx.strokeStyle = '#111';
-    ctx.lineWidth = 2.6;
-    ctx.fillStyle = '#fff';
-    ctx.fillRect(0,0,w,h);
+    ctx.strokeStyle = '#111111';
+    ctx.fillStyle = '#111111';
+    paintWhite();
 
     if (restoreData) {
       const img = new Image();
       img.onload = () => {
-        ctx.drawImage(img,0,0,w,h);
+        ctx.drawImage(img,0,0,canvas.width,canvas.height);
         hasInk = true;
         dirty = false;
         status.textContent = 'Saved handwriting restored. Continue writing or tap Save handwriting again after changes.';
@@ -2127,9 +2127,8 @@ export default function(component) {
     if (!validPng(url)) return;
     const img = new Image();
     img.onload = () => {
-      const { w, h } = cssSize();
-      ctx.fillStyle='#fff'; ctx.fillRect(0,0,w,h);
-      ctx.drawImage(img,0,0,w,h);
+      paintWhite();
+      ctx.drawImage(img,0,0,canvas.width,canvas.height);
       hasInk = true; dirty = true;
       status.textContent = 'Undo applied. Tap Save handwriting when finished.';
     };
@@ -2138,17 +2137,27 @@ export default function(component) {
 
   const point = (ev) => {
     const r = canvas.getBoundingClientRect();
-    return [ev.clientX-r.left, ev.clientY-r.top];
+    const scaleX = canvas.width / Math.max(1, r.width);
+    const scaleY = canvas.height / Math.max(1, r.height);
+    return [(ev.clientX-r.left)*scaleX, (ev.clientY-r.top)*scaleY];
   };
 
   const drawEvent = (ev) => {
-    const events = ev.getCoalescedEvents ? ev.getCoalescedEvents() : [ev];
+    const coalesced = ev.getCoalescedEvents ? ev.getCoalescedEvents() : [];
+    const events = coalesced && coalesced.length ? coalesced : [ev];
     for (const e of events) {
       const [x,y] = point(e);
       const pressure = e.pressure && e.pressure > 0 ? e.pressure : 0.5;
-      ctx.lineWidth = 1.9 + pressure * 2.7;
+      ctx.beginPath();
+      ctx.moveTo(lastX,lastY);
       ctx.lineTo(x,y);
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.strokeStyle = '#111111';
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.lineWidth = (1.9 + pressure * 2.7) * pixelRatio;
       ctx.stroke();
+      ctx.closePath();
       lastX=x; lastY=y;
     }
   };
@@ -2160,7 +2169,13 @@ export default function(component) {
     drawing = true; hasInk = true; dirty = true;
     canvas.setPointerCapture?.(ev.pointerId);
     [lastX,lastY] = point(ev);
-    ctx.beginPath(); ctx.moveTo(lastX,lastY);
+    const pressure = ev.pressure && ev.pressure > 0 ? ev.pressure : 0.5;
+    const radius = Math.max(1.4, (1.2 + pressure * 1.4) * pixelRatio);
+    ctx.beginPath();
+    ctx.fillStyle = '#111111';
+    ctx.arc(lastX,lastY,radius,0,Math.PI*2);
+    ctx.fill();
+    ctx.closePath();
     status.textContent = 'Writing… tap Save handwriting when the page is complete.';
   };
 
@@ -2175,7 +2190,6 @@ export default function(component) {
     ev.preventDefault();
     drawing = false;
     try { canvas.releasePointerCapture?.(ev.pointerId); } catch (_) {}
-    ctx.closePath();
     status.textContent = 'Unsaved handwriting. Tap Save handwriting before checking your answer.';
   };
 
@@ -2191,8 +2205,7 @@ export default function(component) {
 
   clearButton.onclick = () => {
     snapshot();
-    const { w,h }=cssSize();
-    ctx.fillStyle='#fff'; ctx.fillRect(0,0,w,h);
+    paintWhite();
     hasInk=false; dirty=true;
     status.textContent='Canvas cleared locally. Tap Save handwriting to save the blank page, or Undo to restore.';
   };
@@ -2215,7 +2228,7 @@ export default function(component) {
 
 try:
     _handwriting_component = st.components.v2.component(
-        "omt_handwriting_pad",
+        "omt_handwriting_pad_v2",
         html=_HANDWRITING_HTML,
         css=_HANDWRITING_CSS,
         js=_HANDWRITING_JS,
