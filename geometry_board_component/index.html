@@ -144,6 +144,14 @@ let protractor={
   rayAngle:null
 };
 
+let rulerInstrument={
+  visible:false,
+  cx:430,cy:330,
+  length:320,width:58,
+  rotation:0,
+  dragging:null
+};
+
 function resizeCanvas(preserve=true){
   const old=preserve&&drawingCanvas.width?drawingCanvas.toDataURL("image/png"):null;
   const r=wrap.getBoundingClientRect();
@@ -155,6 +163,9 @@ function resizeCanvas(preserve=true){
   ctx.setTransform(dpr,0,0,dpr,0,0);
   dctx.setTransform(dpr,0,0,dpr,0,0);
   ctx.lineCap=dctx.lineCap="round";ctx.lineJoin=dctx.lineJoin="round";
+  rulerInstrument.length=Math.min(320,Math.max(220,cssW-60));
+  rulerInstrument.cx=Math.max(40,Math.min(cssW-40,rulerInstrument.cx));
+  rulerInstrument.cy=Math.max(60,Math.min(cssH-40,rulerInstrument.cy));
   if(old){const im=new Image();im.onload=()=>{dctx.drawImage(im,0,0,cssW,cssH);redrawOverlay()};im.src=old}
   else redrawOverlay();
 }
@@ -362,6 +373,60 @@ function drawProtractor(){
   }
 }
 
+function rulerPoint(localX,localY){
+  const r=rulerInstrument,cos=Math.cos(r.rotation),sin=Math.sin(r.rotation);
+  return [r.cx+localX*cos-localY*sin,r.cy+localX*sin+localY*cos]
+}
+
+function rulerLocal(x,y){
+  const r=rulerInstrument,dx=x-r.cx,dy=y-r.cy,cos=Math.cos(r.rotation),sin=Math.sin(r.rotation);
+  return [dx*cos+dy*sin,-dx*sin+dy*cos]
+}
+
+function rulerRotateHandle(){
+  const r=rulerInstrument;
+  return rulerPoint(0,-r.width/2-28)
+}
+
+function hitRuler(x,y){
+  if(!rulerInstrument.visible)return null;
+  const r=rulerInstrument,h=rulerRotateHandle();
+  if(Math.hypot(x-h[0],y-h[1])<18)return"rotate";
+  const [lx,ly]=rulerLocal(x,y);
+  if(Math.abs(lx)<=r.length/2+6&&Math.abs(ly)<=r.width/2+6)return"move";
+  return null
+}
+
+function rulerAngleDegrees(){
+  let degrees=rulerInstrument.rotation*180/Math.PI;
+  while(degrees<0)degrees+=180;while(degrees>=180)degrees-=180;
+  return degrees
+}
+
+function drawRuler(){
+  const r=rulerInstrument;if(!r.visible)return;
+  ctx.save();ctx.translate(r.cx,r.cy);ctx.rotate(r.rotation);
+  const left=-r.length/2,top=-r.width/2;
+  ctx.fillStyle="rgba(255,222,115,.78)";ctx.strokeStyle="#8a6b19";ctx.lineWidth=2;
+  ctx.beginPath();ctx.rect(left,top,r.length,r.width);ctx.fill();ctx.stroke();
+  ctx.strokeStyle="#5c4814";ctx.fillStyle="#46380f";ctx.textAlign="center";ctx.textBaseline="top";
+  for(let px=0;px<=r.length;px+=10){
+    const halfUnit=px/10,major=halfUnit%2===0,medium=halfUnit%1===0;
+    const tick=major?22:(medium?15:9),x=left+px;
+    ctx.lineWidth=major?1.5:1;ctx.beginPath();ctx.moveTo(x,top);ctx.lineTo(x,top+tick);ctx.stroke();
+    if(major){ctx.font="10px Arial";ctx.fillText(String(Math.round(px/20)),x,top+24)}
+  }
+  ctx.font="10px Arial";ctx.textAlign="right";ctx.fillText("units",left+r.length-5,top+r.width-15);
+  ctx.restore();
+
+  const h=rulerRotateHandle(),anchor=rulerPoint(0,-r.width/2);
+  ctx.save();ctx.setLineDash([4,4]);ctx.strokeStyle="#7c651f";ctx.lineWidth=1.5;
+  ctx.beginPath();ctx.moveTo(anchor[0],anchor[1]);ctx.lineTo(h[0],h[1]);ctx.stroke();ctx.setLineDash([]);
+  ctx.fillStyle="#fff";ctx.strokeStyle="#8a6b19";ctx.lineWidth=2;
+  ctx.beginPath();ctx.arc(h[0],h[1],10,0,Math.PI*2);ctx.fill();ctx.stroke();
+  ctx.fillStyle="#725a18";ctx.font="bold 13px Arial";ctx.textAlign="left";ctx.fillText("↻",h[0]-6,h[1]+5);ctx.restore()
+}
+
 function redrawOverlay(){
   ctx.clearRect(0,0,cssW,cssH);
   ctx.drawImage(drawingCanvas,0,0,cssW,cssH);
@@ -371,6 +436,7 @@ function redrawOverlay(){
     ctx.save();ctx.strokeStyle="#222";ctx.lineWidth=2;
     ctx.beginPath();ctx.moveTo(linePreview.x1,linePreview.y1);ctx.lineTo(linePreview.x2,linePreview.y2);ctx.stroke();ctx.restore()
   }
+  drawRuler();
   drawCompass();
   drawProtractor();
 }
@@ -383,6 +449,13 @@ function setTool(t){
     }else{
       protractor.visible=true;tool="protractor"
     }
+  }else if(t==="ruler"){
+    if(rulerInstrument.visible){
+      rulerInstrument.visible=false;rulerInstrument.dragging=null;
+      if(tool==="ruler")tool="pen"
+    }else{
+      rulerInstrument.visible=true;tool="ruler"
+    }
   }else{
     if(tool===t&&t==="compass")t="pen";
     tool=t
@@ -391,14 +464,16 @@ function setTool(t){
   if(tool!=="move")selectedSegment=-1;
   canvas.style.cursor=tool==="move"?"grab":"crosshair";
   document.querySelectorAll("[data-tool]").forEach(b=>{
-    const active=b.dataset.tool==="protractor"?protractor.visible:b.dataset.tool===tool;
+    const active=b.dataset.tool==="protractor"?protractor.visible:
+      (b.dataset.tool==="ruler"?rulerInstrument.visible:b.dataset.tool===tool);
     b.classList.toggle("active",active);b.setAttribute("aria-pressed",active?"true":"false");
-    if(b.dataset.tool==="protractor")b.querySelector("span:last-child").textContent=protractor.visible?"Protractor ✓":"Protractor"
+    if(b.dataset.tool==="protractor")b.querySelector("span:last-child").textContent=protractor.visible?"Protractor ✓":"Protractor";
+    if(b.dataset.tool==="ruler")b.querySelector("span:last-child").textContent=rulerInstrument.visible?"Ruler ✓":"Ruler"
   });
   compass.visible=tool==="compass";
   measureEl.textContent="";
-  hintEl.style.display=(tool==="compass"||(tool==="protractor"&&protractor.visible))?"block":"none";
-  lengthControl.classList.toggle("visible",tool==="line"||tool==="ruler");
+  hintEl.style.display=(tool==="compass"||(tool==="protractor"&&protractor.visible)||(tool==="ruler"&&rulerInstrument.visible))?"block":"none";
+  lengthControl.classList.toggle("visible",tool==="line");
   radiusControl.classList.toggle("visible",tool==="compass");
   if(tool==="compass"){
     statusEl.textContent="Compass — type a radius or adjust the white handle; drag hinge to move; drag pencil tip to draw an arc";
@@ -406,12 +481,15 @@ function setTool(t){
   }else if(tool==="protractor"&&protractor.visible){
     statusEl.textContent="Protractor — drag its body to move; drag top handle to rotate; drag from centre to place/read a ray";
     hintEl.textContent="Protractor: body = move • top handle = rotate • centre = measure/draw ray"
+  }else if(tool==="ruler"&&rulerInstrument.visible){
+    statusEl.textContent="Ruler — drag its body to move; drag the ↻ handle to rotate; read length from the scale";
+    hintEl.textContent="Ruler: numbered scale = measure • body = move • ↻ handle = rotate"
   }else{
     hintEl.style.display="none";
     statusEl.textContent={
       pen:"Pencil — Apple Pencil, touch or mouse",
       line:"Line — optionally type an exact length, then drag to choose direction",
-      ruler:"Ruler — drag between two points",
+      ruler:"Ruler — move and rotate the numbered measuring scale",
       move:"Move — drag a line to reposition it; drag its ↻ handle to rotate it",
       eraser:"Eraser — drag over unwanted working"
     }[tool]||tool
@@ -455,6 +533,20 @@ function commitArc(prevAngle,newAngle){
 function pointerStart(e){
   e.preventDefault();
   const [x,y]=pos(e);
+
+  const rulerHit=hitRuler(x,y);
+  if(rulerHit){
+    const r=rulerInstrument;r.dragging=rulerHit;pointerDown=true;
+    canvas.setPointerCapture?.(e.pointerId);
+    if(rulerHit==="move"){
+      r.dragOffsetX=x-r.cx;r.dragOffsetY=y-r.cy;canvas.style.cursor="grabbing";
+      statusEl.textContent="Ruler — moving; read distances directly from the numbered scale"
+    }else{
+      r.dragAngleOffset=r.rotation-Math.atan2(y-r.cy,x-r.cx);canvas.style.cursor="alias";
+      statusEl.textContent="Ruler — rotating around its midpoint"
+    }
+    redrawOverlay();return
+  }
 
   if(tool==="move"){
     const rotateExisting=selectedSegment>=0&&hitRotationHandle(x,y,segments[selectedSegment]);
@@ -514,6 +606,18 @@ function pointerMove(e){
   if(!pointerDown)return;
   e.preventDefault();
   const [x,y]=pos(e);
+
+  if(rulerInstrument.dragging){
+    const r=rulerInstrument;
+    if(r.dragging==="move"){
+      r.cx=Math.max(20,Math.min(cssW-20,x-r.dragOffsetX));
+      r.cy=Math.max(20,Math.min(cssH-20,y-r.dragOffsetY))
+    }else if(r.dragging==="rotate"){
+      r.rotation=Math.atan2(y-r.cy,x-r.cx)+r.dragAngleOffset
+    }
+    measureEl.textContent="Ruler: "+(r.length/20).toFixed(1)+" units · angle: "+rulerAngleDegrees().toFixed(1)+"°";
+    redrawOverlay();return
+  }
 
   if(tool==="move"&&selectedSegment>=0&&moveStart&&moveOriginal){
     const s=segments[selectedSegment];
@@ -579,7 +683,7 @@ function pointerMove(e){
     redrawOverlay();return
   }
 
-  if(tool==="line"||tool==="ruler"){
+  if(tool==="line"){
     let dx=x-sx,dy=y-sy;
     let px=Math.hypot(dx,dy);
     const exact=Number.parseFloat(lineLengthInput.value);
@@ -598,9 +702,9 @@ function pointerEnd(e){
   if(!pointerDown)return;
   pointerDown=false;
   try{canvas.releasePointerCapture?.(e.pointerId)}catch(_){}
-  if((tool==="line"||tool==="ruler")&&linePreview){
+  if(tool==="line"&&linePreview){
     const px=Math.hypot(linePreview.x2-linePreview.x1,linePreview.y2-linePreview.y1);
-    segments.push({...linePreview,label:tool==="ruler"?(px/20).toFixed(1)+" units":""});
+    segments.push({...linePreview,label:""});
     linePreview=null;redrawOverlay()
   }
   if(tool==="move"){
@@ -611,7 +715,11 @@ function pointerEnd(e){
       :"Move — select a line"
   }
   if(tool==="compass")compass.dragging=null;
-  if(tool==="protractor")protractor.dragging=null
+  if(tool==="protractor")protractor.dragging=null;
+  if(rulerInstrument.dragging){
+    rulerInstrument.dragging=null;canvas.style.cursor=tool==="move"?"grab":"crosshair";
+    statusEl.textContent="Ruler positioned — scale length "+(rulerInstrument.length/20).toFixed(1)+" units · angle "+rulerAngleDegrees().toFixed(1)+"°"
+  }
 }
 
 canvas.addEventListener("pointerdown",pointerStart,{passive:false});
