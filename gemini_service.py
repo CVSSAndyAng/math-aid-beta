@@ -2163,7 +2163,7 @@ _GENERIC_TOPIC_WORDS = {
     "and", "the", "of", "in", "with", "mathematics", "maths", "number",
     "algebra", "geometry", "measurement", "statistics", "probability",
     "calculus", "functions", "applications", "concepts", "chapter", "topic",
-    "equation", "equations", "theorem", "theorems",
+    "equation", "equations", "theorem", "theorems", "form",
 }
 
 
@@ -2197,6 +2197,15 @@ def _topic_tokens(value: str) -> set[str]:
     return roots
 
 
+def _setter_question_matches_topics(question: SetterPaperQuestion, selected_topics: list[str]) -> bool:
+    """Return whether the question's declared topic belongs to the selection."""
+    selected = [(label, _topic_tokens(label)) for label in selected_topics if str(label).strip()]
+    if not selected:
+        return True
+    actual = _topic_tokens(question.topic)
+    return bool(actual and any(actual & expected for _, expected in selected))
+
+
 def audit_setter_topic_alignment(draft: ExamPaperDraft, selected_topics: list[str]) -> list[str]:
     """Reject questions whose declared topic is outside the teacher's selection."""
     selected = [(label, _topic_tokens(label)) for label in selected_topics if str(label).strip()]
@@ -2204,8 +2213,7 @@ def audit_setter_topic_alignment(draft: ExamPaperDraft, selected_topics: list[st
         return []
     issues: list[str] = []
     for question in draft.questions:
-        actual = _topic_tokens(question.topic)
-        if actual and any(actual & expected for _, expected in selected):
+        if _setter_question_matches_topics(question, selected_topics):
             continue
         allowed = ", ".join(label for label, _ in selected)
         issues.append(
@@ -3035,6 +3043,134 @@ Return JSON matching the supplied schema only.
         return notes
 
 
+    def _repair_topic_mismatched_questions(
+        draft: ExamPaperDraft,
+        *,
+        attempts: int = 3,
+    ) -> list[str]:
+        """Replace only off-topic questions instead of rejecting the full paper."""
+        mismatched = [
+            (index, question)
+            for index, question in enumerate(draft.questions)
+            if not _setter_question_matches_topics(question, topics)
+        ]
+        if not mismatched:
+            return []
+
+        valid_summaries: list[str] = []
+        for index, question in enumerate(draft.questions):
+            if any(index == bad_index for bad_index, _ in mismatched):
+                continue
+            valid_summaries.append(
+                f"Q{question.question_number}: {question.topic}; {question.stem_text[:240]}"
+            )
+
+        required_specs = [
+            (
+                f"Q{question.question_number}: exactly {question.marks} marks; "
+                f"AO={question.ao}; difficulty={question.difficulty}; "
+                f"rejected declared topic={question.topic}"
+            )
+            for _, question in mismatched
+        ]
+        rejected_topics = sorted({str(question.topic).strip() for _, question in mismatched})
+
+        repair_prompt = f"""
+TARGETED TOPIC REPAIR — REPLACE ONLY THE REJECTED QUESTIONS
+
+The rest of the assessment is valid. Generate exactly {len(mismatched)} replacement main question(s).
+
+Track: {track_label}
+Assessment type: {assessment_type}
+AUTHORITATIVE selected topic(s): {topic_text}
+Teacher focus: {question_focus.strip() or '[None]'}
+Syllabus notes for the selected topic(s):
+{syllabus_notes.strip() or '[None]'}
+
+REPLACEMENT SLOTS — preserve each question number and exact total marks:
+{chr(10).join(required_specs)}
+
+REJECTED TOPICS — DO NOT USE, even if they appear incidentally in broad syllabus notes:
+{', '.join(rejected_topics) or '[None]'}
+
+VALID QUESTIONS — do not repeat their task, values or context:
+{chr(10).join(valid_summaries) if valid_summaries else '[None]'}
+
+Requirements:
+- Every replacement must directly test one of the authoritative selected topics.
+- Set the topic field to the matching selected topic name, not a nearby algebra topic.
+- Preserve the specified question number, AO, difficulty and exact total marks.
+- Part marks must sum exactly to the question marks and every question must contain at least one part.
+- Use fresh values and a fully solvable mathematical task.
+- Keep prose, equations, tables and diagrams in their correct structured fields.
+- If include_marking_scheme={include_marking_scheme}, include concise valid solutions and marking points.
+- Return only the replacement questions in the questions array, in the listed order.
+
+Return JSON matching the supplied schema only.
+""".strip()
+
+        last_exc: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            retry = ""
+            if attempt > 1:
+                retry = (
+                    "\nRETRY: A previous replacement was invalid or still off-topic. "
+                    f"Return exactly {len(mismatched)} complete replacement question objects. "
+                    f"Use only: {topic_text}. Do not use: {', '.join(rejected_topics)}."
+                )
+            try:
+                interaction = active_client.interactions.create(
+                    model=get_model(model),
+                    store=False,
+                    input=[{"type": "text", "text": repair_prompt + retry}],
+                    response_format={
+                        "type": "text",
+                        "mime_type": "application/json",
+                        "schema": _SetterQuestionBatch.model_json_schema(),
+                    },
+                )
+                raw = str(interaction.output_text or "").strip()
+                if not raw:
+                    raise ValueError("Gemini returned an empty topic-repair response.")
+                batch = _SetterQuestionBatch.model_validate_json(raw)
+                replacements = list(batch.questions or [])
+                if len(replacements) != len(mismatched):
+                    raise ValueError(
+                        f"Topic repair returned {len(replacements)} questions instead of {len(mismatched)}."
+                    )
+
+                for replacement, (_, original) in zip(replacements, mismatched):
+                    if not replacement.parts:
+                        raise ValueError("A topic-repair question contained no parts.")
+                    if not _setter_question_matches_topics(replacement, topics):
+                        raise ValueError(
+                            f"Replacement topic '{replacement.topic}' is outside {topic_text}."
+                        )
+                    part_total = sum(int(part.marks) for part in replacement.parts)
+                    if part_total != int(original.marks):
+                        raise ValueError(
+                            f"Replacement Q{original.question_number} has {part_total} part marks; "
+                            f"expected {original.marks}."
+                        )
+                    replacement.question_number = str(original.question_number)
+                    replacement.marks = int(original.marks)
+
+                notes: list[str] = []
+                for replacement, (index, original) in zip(replacements, mismatched):
+                    draft.questions[index] = replacement
+                    notes.append(
+                        f"Question {original.question_number}: replaced off-topic '{original.topic}' "
+                        f"content with '{replacement.topic}'."
+                    )
+                return notes
+            except Exception as exc:
+                last_exc = exc
+
+        if last_exc is not None:
+            raise last_exc
+        return []
+
+
     # Mark distribution is flexible. Reconcile it locally before asking Gemini
     # to regenerate anything.
     mark_notes = _normalise_whole_question_parts(result)
@@ -3043,16 +3179,15 @@ Return JSON matching the supplied schema only.
     diagram_issues = audit_setter_diagrams(result)
     topic_issues = audit_setter_topic_alignment(result, topics)
 
-    # Ask Gemini once more to repair any genuinely structural, topic, or diagram mismatch.
-    # Mark allocation itself is already handled locally.
-    issues = mark_issues + topic_issues + diagram_issues
+    # Ask Gemini once more only for whole-paper structural/diagram problems.
+    # Topic mismatches use the targeted replacement path below; rewriting the
+    # complete paper for two off-topic questions is slower and less reliable.
+    issues = mark_issues + diagram_issues
     if issues:
         correction = (
-            "Correct ONLY the remaining structural, selected-topic, mark-allocation, or diagram-consistency problems below. "
+            "Correct ONLY the remaining structural, mark-allocation, or diagram-consistency problems below. "
             "The overall requested mark total is authoritative, but the distribution of marks between questions "
             "and parts is flexible. Preserve valid questions, wording and numbering. "
-            "Any topic-mismatched question must be replaced by a fresh question that directly tests one of the selected topics; "
-            "do not merely relabel an unrelated question. "
             "For each diagram issue, rebuild the scene so it exactly matches the named points, circles, tangents, "
             "chords, intersections, functions and solids in the question. "
             "If you cannot construct a reliable diagram, set both diagram_scene_2d and diagram_scene_3d to null "
@@ -3085,6 +3220,24 @@ Return JSON matching the supplied schema only.
         except Exception as exc:
             question_count_notes.append(
                 "Automatic missing-question recovery was attempted but did not complete: "
+                + str(exc)[:240]
+            )
+
+    # If the broad full-paper retry left any off-topic items unchanged, replace
+    # only those question objects.  This is faster and more reliable than asking
+    # Gemini to rewrite the complete paper again.
+    topic_repair_notes: list[str] = []
+    if topic_issues:
+        try:
+            topic_repair_notes.extend(_repair_topic_mismatched_questions(result))
+            mark_notes.extend(_normalise_whole_question_parts(result))
+            mark_notes.extend(reconcile_marks(result))
+            _, mark_issues = audit_marks(result)
+            diagram_issues = audit_setter_diagrams(result)
+            topic_issues = audit_setter_topic_alignment(result, topics)
+        except Exception as exc:
+            topic_repair_notes.append(
+                "Automatic off-topic question replacement was attempted but did not complete: "
                 + str(exc)[:240]
             )
 
@@ -3149,6 +3302,7 @@ Return JSON matching the supplied schema only.
     verification_notes = list(result.verification_notes or [])
     verification_notes.extend(mark_notes[:6])
     verification_notes.extend(question_count_notes[:4])
+    verification_notes.extend(topic_repair_notes[:6])
     verification_notes.extend(diagram_notes[:8])
     if diagram_notes:
         verification_notes.append(
