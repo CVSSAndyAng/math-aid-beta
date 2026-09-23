@@ -606,12 +606,36 @@ def _normalise_math_variable_italics(source: str) -> str:
         "kg": r"\mathrm{kg}",
         "rad": r"\mathrm{rad}",
     }
+
+    # Preserve units that are already correctly wrapped.  Previously the bare
+    # unit pass saw the ``kg`` inside ``\mathrm{kg}`` and wrapped it a second
+    # time, producing invalid source such as ``\mathrm{\mathrm{kg}}``.
+    text = re.sub(
+        r"\\(?:mathrm|text|mathbf)\s*\{\s*(mm|cm|km|kg|rad)\s*\}",
+        lambda m: rf"\mathrm{{{m.group(1).lower()}}}",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    # Repair a common model transport error where the braces around an upright
+    # unit are omitted (for example ``\mathrmkg``).
+    text = re.sub(
+        r"\\mathrm\s*(mm|cm|km|kg|rad)\b",
+        lambda m: rf"\mathrm{{{m.group(1).lower()}}}",
+        text,
+        flags=re.IGNORECASE,
+    )
+
     for unit, latex in unit_map.items():
         text = re.sub(
-            rf"(?<![A-Za-z\\]){re.escape(unit)}\b",
+            rf"(?<![A-Za-z\\{{]){re.escape(unit)}\b",
             lambda _m, repl=latex: repl,
             text,
         )
+
+    # A raw percent character is a LaTeX comment marker.  MathLive therefore
+    # hides it unless it is escaped.  Keep already escaped percentages intact.
+    text = re.sub(r"(?<!\\)%", r"\\%", text)
 
     return text
 
@@ -5465,6 +5489,7 @@ def _latex_display_text(value: str) -> str:
         r"\leq": "≤", r"\le": "≤", r"\geq": "≥", r"\ge": "≥",
         r"\neq": "≠", r"\pm": "±", r"\circ": "°", r"\cdot": "·",
         r"\infty": "∞", r"\approx": "≈", r"\therefore": "∴",
+        r"\%": "%",
     }
     for src, dst in replacements.items():
         text = text.replace(src, dst)
@@ -8835,10 +8860,11 @@ def build_setter_question_paper_docx(draft: ExamPaperDraft) -> bytes:
             pp.paragraph_format.left_indent = Cm(0.5)
             if part.label and not _is_generic_whole_question_label(part.label):
                 rr = pp.add_run(part.label + " "); rr.bold = True
-            append_word_mixed_math(
-                pp,
-                _question_prose_without_repeated_math(part.prompt_text, part.equations),
-            )
+            if not _part_prompt_repeats_stem(q, part):
+                append_word_mixed_math(
+                    pp,
+                    _question_prose_without_repeated_math(part.prompt_text, part.equations),
+                )
             for eq in part.equations:
                 if _part_equation_repeats_stem(q, eq):
                     continue
@@ -9186,6 +9212,31 @@ def _part_equation_repeats_stem(question, equation: str) -> bool:
         return True
     # Equivalent integral notation may rewrite a quotient as a negative power.
     return r"\int" in key and r"\int" in stem_key
+
+
+def _part_prompt_repeats_stem(question, part) -> bool:
+    """Suppress a redundant whole-question prompt already stated in the stem.
+
+    Gemini sometimes represents an ordinary single-part question twice: once
+    in ``stem_text`` and again as an unlabelled part.  A shortened restatement
+    such as "Calculate the percentage increase" is redundant too.
+    """
+    if len(list(getattr(question, "parts", []) or [])) != 1:
+        return False
+    if not _is_generic_whole_question_label(getattr(part, "label", "")):
+        return False
+
+    def canonical(value: str) -> str:
+        value = _strip_visible_latex_text_commands(str(value or ""))
+        value = re.sub(r"\\(?:mathrm|text)\s*\{([^{}]*)\}", r"\1", value)
+        value = value.replace(r"\%", "%")
+        return re.sub(r"[^a-z0-9%]+", " ", value.lower()).strip()
+
+    stem = canonical(getattr(question, "stem_text", ""))
+    prompt = canonical(getattr(part, "prompt_text", ""))
+    if not stem or not prompt:
+        return False
+    return prompt == stem or (len(prompt.split()) >= 3 and prompt in stem)
 
 
 def _is_generic_whole_question_label(label: str) -> bool:
@@ -9627,7 +9678,10 @@ def render_setter_preview(draft: ExamPaperDraft) -> None:
                     else:
                         st.markdown(f"#### {label} [{part.marks} marks]")
 
-                if str(part.prompt_text or "").strip():
+                if (
+                    str(part.prompt_text or "").strip()
+                    and not _part_prompt_repeats_stem(q, part)
+                ):
                     clean_prompt = _question_prose_without_repeated_math(
                         part.prompt_text,
                         part.equations,

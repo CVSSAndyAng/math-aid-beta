@@ -2685,6 +2685,69 @@ Return structured JSON only.
         part.marking_points = points
 
 
+    def _normalise_whole_question_parts(draft: ExamPaperDraft) -> list[str]:
+        """Represent valid single-part questions without forcing AI regeneration.
+
+        A main question does not need a visible (a) label.  The schema still
+        needs one internal part for marks, answer space and the marking scheme,
+        so create that part locally when the complete wording is already in the
+        stem.  Also remove an unlabelled prompt that merely repeats the stem.
+        """
+        notes: list[str] = []
+
+        def canonical(value: str) -> str:
+            text = str(value or "")
+            text = re.sub(r"\\(?:mathrm|text)\s*\{([^{}]*)\}", r"\1", text)
+            text = text.replace(r"\%", "%")
+            return re.sub(r"[^a-z0-9%]+", " ", text.lower()).strip()
+
+        for q in draft.questions:
+            if not q.parts:
+                # SetterPaperPart has a 20-mark schema limit.  Leave an unusual
+                # larger empty question for the strict audit instead of creating
+                # an invalid object or silently changing its marks.
+                if not str(q.stem_text or "").strip() or int(q.marks) > 20:
+                    continue
+                q.parts = [
+                    SetterPaperPart(
+                        label="",
+                        prompt_text="",
+                        equations=[],
+                        marks=int(q.marks),
+                        answer_space_lines=max(3, min(12, int(q.marks) + 2)),
+                        solution_steps=[],
+                        final_answer_mathio="",
+                        marking_points=[],
+                    )
+                ]
+                notes.append(
+                    f"Question {q.question_number}: treated as a valid unlabelled single-part question."
+                )
+                continue
+
+            if len(q.parts) != 1:
+                continue
+            part = q.parts[0]
+            if str(part.label or "").strip().lower() not in {"", "question", "whole question"}:
+                continue
+            stem_key = canonical(q.stem_text)
+            prompt_key = canonical(part.prompt_text)
+            if (
+                stem_key
+                and prompt_key
+                and (
+                    prompt_key == stem_key
+                    or (len(prompt_key.split()) >= 3 and prompt_key in stem_key)
+                )
+            ):
+                part.prompt_text = ""
+                notes.append(
+                    f"Question {q.question_number}: removed a repeated unlabelled prompt."
+                )
+
+        return notes
+
+
     def reconcile_marks(draft: ExamPaperDraft) -> list[str]:
         """Reconcile small/medium mark-allocation inconsistencies locally.
 
@@ -2965,7 +3028,8 @@ Return JSON matching the supplied schema only.
 
     # Mark distribution is flexible. Reconcile it locally before asking Gemini
     # to regenerate anything.
-    mark_notes = reconcile_marks(result)
+    mark_notes = _normalise_whole_question_parts(result)
+    mark_notes.extend(reconcile_marks(result))
     _, mark_issues = audit_marks(result)
     diagram_issues = audit_setter_diagrams(result)
     topic_issues = audit_setter_topic_alignment(result, topics)
@@ -2992,6 +3056,7 @@ Return JSON matching the supplied schema only.
             # Keep the otherwise-valid draft. We will reconcile and sanitise locally below.
             pass
 
+        mark_notes.extend(_normalise_whole_question_parts(result))
         mark_notes.extend(reconcile_marks(result))
         _, mark_issues = audit_marks(result)
         diagram_issues = audit_setter_diagrams(result)
@@ -3003,6 +3068,7 @@ Return JSON matching the supplied schema only.
     if len(result.questions) != int(number_of_questions):
         try:
             question_count_notes.extend(_repair_question_count(result))
+            mark_notes.extend(_normalise_whole_question_parts(result))
             mark_notes.extend(reconcile_marks(result))
             _, mark_issues = audit_marks(result)
             diagram_issues = audit_setter_diagrams(result)
