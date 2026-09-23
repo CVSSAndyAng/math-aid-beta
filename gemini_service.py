@@ -2250,9 +2250,13 @@ def generate_exam_paper_draft(
     active_client = client or _make_client(api_key)
     topic_text = ", ".join(topics) if topics else "See teacher syllabus notes"
     scheme_rule = (
-        "Generate solution_steps and Cambridge-style marking_points for every part."
+        "Generate concise solution_steps, final_answer_mathio and Cambridge-style marking_points for every part."
         if include_marking_scheme
-        else "Still solve every part internally for correctness, but marking_points may be empty."
+        else (
+            "Solve every question internally for correctness, but return solution_steps=[], "
+            "final_answer_mathio='', and marking_points=[] for every part. Do not spend output tokens "
+            "on an answer guide when the teacher did not request one."
+        )
     )
     reference_mode_note = (
         "A reference paper IS supplied; use it for format only."
@@ -2533,10 +2537,11 @@ School: {school_name or '[Leave generic if not supplied]'}
 Requested title: {paper_title or '[Create a suitable title for the selected assessment]'}
 
 REFERENCE PAPER
-{reference_text[:50000] if reference_text.strip() else '[No reference paper supplied — use built-in Singapore assessment conventions]'}
+{reference_text[:24000] if reference_text.strip() else '[No reference paper supplied — use built-in Singapore assessment conventions]'}
 
 OUTPUT-SIZE CONTRACT
 - Return compact JSON. Do not repeat the question text in solution_steps or marking_points.
+- When no marking scheme is requested, all solution_steps, final_answer_mathio and marking_points fields must be empty.
 - Use at most 4 concise solution_steps per part.
 - Each solution_step should normally be one short sentence plus an equation.
 - Each marking-point description must be concise (normally under 18 words).
@@ -3171,27 +3176,29 @@ Return JSON matching the supplied schema only.
         return []
 
 
-    # Mark distribution is flexible. Reconcile it locally before asking Gemini
-    # to regenerate anything.
+    # Mark distribution and numbering are deterministic local repairs.  Keeping
+    # them out of the API retry path substantially reduces normal generation time.
+    _renumber_questions_sequentially(result)
     mark_notes = _normalise_whole_question_parts(result)
     mark_notes.extend(reconcile_marks(result))
     _, mark_issues = audit_marks(result)
     diagram_issues = audit_setter_diagrams(result)
     topic_issues = audit_setter_topic_alignment(result, topics)
 
-    # Ask Gemini once more only for whole-paper structural/diagram problems.
-    # Topic mismatches use the targeted replacement path below; rewriting the
-    # complete paper for two off-topic questions is slower and less reliable.
-    issues = mark_issues + diagram_issues
+    # Diagrams are handled by the tolerant local policy below, question-count
+    # problems have a targeted recovery, and topic mismatches have a targeted
+    # replacement.  A full-paper retry is reserved for the rare structural
+    # failures that cannot be repaired locally.
+    issues = [
+        issue for issue in mark_issues
+        if not issue.startswith("Generated ")
+        and not issue.startswith("Duplicate question number")
+    ]
     if issues:
         correction = (
-            "Correct ONLY the remaining structural, mark-allocation, or diagram-consistency problems below. "
+            "Correct ONLY the remaining structural or mark-allocation problems below. "
             "The overall requested mark total is authoritative, but the distribution of marks between questions "
             "and parts is flexible. Preserve valid questions, wording and numbering. "
-            "For each diagram issue, rebuild the scene so it exactly matches the named points, circles, tangents, "
-            "chords, intersections, functions and solids in the question. "
-            "If you cannot construct a reliable diagram, set both diagram_scene_2d and diagram_scene_3d to null "
-            "for that question instead of inventing an inaccurate figure. "
             "Return the complete corrected JSON object.\n- " + "\n- ".join(issues)
         )
         try:

@@ -10423,7 +10423,13 @@ if role_mode == "For Teacher":
                     "Generate marking scheme together with the paper",
                     value=False,
                     key="setter_include_scheme",
+                    help=(
+                        "Leave this unchecked for the fastest paper generation. "
+                        "A full worked marking scheme requires substantially more AI output."
+                    ),
                 )
+                if include_scheme:
+                    st.caption("A combined paper and marking scheme takes longer than a question paper alone.")
 
             st.markdown("#### 3 · Reference format paper (optional)")
             setter_reference = st.file_uploader(
@@ -10480,11 +10486,24 @@ if role_mode == "For Teacher":
                         source_syllabus_notes = topic_notes_for_selection(
                             track_code(setter_track_label), list(setter_topics)
                         )
+                        scope_keywords = " ".join(
+                            [*map(str, setter_topics), str(setter_question_focus or "")]
+                        ).lower()
+                        needs_table_rules = bool(re.search(
+                            r"\b(?:statistics|data|frequency|histogram|scatter|box plot|"
+                            r"cumulative|survey|table|chart)\b",
+                            scope_keywords,
+                        ))
+                        needs_solid_rules = bool(re.search(
+                            r"\b(?:surface area|volume|solid|cuboid|cube|prism|pyramid|"
+                            r"cylinder|cone|sphere|hemisphere|mensuration)\b",
+                            scope_keywords,
+                        ))
                         combined_syllabus_notes = "\n\n".join(
                             x for x in [
                                 source_syllabus_notes,
-                                _TABLE_GENERATION_REQUIREMENTS,
-                                _SOLID3D_GENERATION_REQUIREMENTS,
+                                _TABLE_GENERATION_REQUIREMENTS if needs_table_rules else "",
+                                _SOLID3D_GENERATION_REQUIREMENTS if needs_solid_rules else "",
                                 _regenerative_instruction_block(),
                                 _MATHIO_STRUCTURE_CONTRACT,
                             ]
