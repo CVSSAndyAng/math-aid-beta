@@ -693,7 +693,7 @@ def render_mathio(text: str) -> None:
 
 
 _MATHIO_MIXED_PATTERN = re.compile(
-    r"(\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\)|\$\$[\s\S]*?\$\$|\$[^$\n]+?\$)"
+    r"(\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\)|\$\$[\s\S]*?\$\$|(?<!\\)\$(?!\s*\d)[^$\n]+?(?<!\\)\$)"
 )
 
 
@@ -708,6 +708,11 @@ def _normalize_generated_math_text(value: str) -> str:
     text = str(value or "").strip()
     if not text:
         return ""
+
+    # Currency is prose, not a pair of LaTeX delimiters.  Models commonly emit
+    # ``\$400 ... \$460``; keep the visible dollar signs and let the mixed
+    # renderer treat each amount as ordinary text.
+    text = text.replace(r"\$", "$")
 
     # Repair transport damage and commands that are harmless inside LaTeX but
     # distracting when a generated sentence has not supplied delimiters.
@@ -858,7 +863,10 @@ def render_mathio_mixed(text: str) -> None:
     if not value:
         return
 
-    if _mathio_rich_component is not None and _MATHIO_MIXED_PATTERN.search(value):
+    if _mathio_rich_component is not None and (
+        _MATHIO_MIXED_PATTERN.search(value)
+        or re.search(r"(?:S)?\$\s*\d", value, flags=re.IGNORECASE)
+    ):
         _mathio_rich_component(
             data={"text": value},
             default={},
@@ -874,7 +882,10 @@ def render_mathio_mixed(text: str) -> None:
         render_mathio(stripped)
         return
 
-    st.markdown(value)
+    # In the plain Markdown fallback, escape currency dollars so Markdown does
+    # not interpret two prices as one large inline maths expression.
+    safe_value = re.sub(r"(?<!\\)\$(?=\s*\d)", r"\\$", value)
+    st.markdown(safe_value)
 
 
 
@@ -1495,7 +1506,8 @@ export default async function(component) {{
   try {{
     await ensureMathLiveForRich();
     const raw = String(data?.text || '');
-    const pattern = /(\\\\\\[[\\s\\S]*?\\\\\\]|\\\\\\([\\s\\S]*?\\\\\\)|\\$\\$[\\s\\S]*?\\$\\$|\\$[^$\\n]+?\\$)/g;
+    // A dollar followed by a number is currency, not a maths delimiter.
+    const pattern = /(\\\\\\[[\\s\\S]*?\\\\\\]|\\\\\\([\\s\\S]*?\\\\\\)|\\$\\$[\\s\\S]*?\\$\\$|(?<!\\\\)\\$(?!\\s*\\d)[^$\\n]+?(?<!\\\\)\\$)/g;
     let last = 0;
     for (const match of raw.matchAll(pattern)) {{
       appendTextWithBold(root, raw.slice(last, match.index));
@@ -1521,7 +1533,7 @@ export default async function(component) {{
 
 try:
     _mathio_rich_component = st.components.v2.component(
-        "omt_rich_math_text",
+        "omt_rich_math_text_v2",
         html=_MATHIO_RICH_HTML,
         css=_MATHIO_RICH_CSS,
         js=_MATHIO_RICH_JS,
@@ -4605,6 +4617,7 @@ def _plainify_embedded_math(text: str) -> str:
     value = text
 
     replacements = {
+        r"\$": "$",
         r"\pi": "π",
         r"\theta": "θ",
         r"\alpha": "α",
@@ -6585,6 +6598,17 @@ def _real_life_context_query(text: str) -> str | None:
     if any(re.search(pattern, source, flags=re.IGNORECASE) for pattern in suppress_patterns):
         return None
 
+    # A stock photograph does not help solve an arithmetic question merely
+    # because its story mentions a bicycle, television, book, etc.  In
+    # particular, price/profit/discount questions were receiving unrelated
+    # storefront photographs from broad image-search results.
+    if re.search(
+        r"\b(?:bought|sold|price|cost|sale|profit|loss|discount|percentage increase|percentage decrease)\b",
+        source,
+        flags=re.IGNORECASE,
+    ):
+        return None
+
     for pattern, query in _REAL_LIFE_CONTEXT_TERMS:
         if re.search(pattern, source, flags=re.IGNORECASE):
             return query
@@ -6680,6 +6704,8 @@ def _question_context_text(question) -> str:
 
 
 def _question_context_image(question) -> dict | None:
+    if _context_image_should_be_suppressed(question):
+        return None
     return _context_image_for_text(_question_context_text(question))
 
 
@@ -8858,7 +8884,11 @@ def build_setter_question_paper_docx(draft: ExamPaperDraft) -> bytes:
         for part in q.parts:
             pp = doc.add_paragraph()
             pp.paragraph_format.left_indent = Cm(0.5)
-            if part.label and not _is_generic_whole_question_label(part.label):
+            if (
+                part.label
+                and not _is_generic_whole_question_label(part.label)
+                and not _part_label_is_redundant(q, part)
+            ):
                 rr = pp.add_run(part.label + " "); rr.bold = True
             if not _part_prompt_repeats_stem(q, part):
                 append_word_mixed_math(
@@ -9223,7 +9253,10 @@ def _part_prompt_repeats_stem(question, part) -> bool:
     """
     if len(list(getattr(question, "parts", []) or [])) != 1:
         return False
-    if not _is_generic_whole_question_label(getattr(part, "label", "")):
+    if not (
+        _is_generic_whole_question_label(getattr(part, "label", ""))
+        or _part_label_is_redundant(question, part)
+    ):
         return False
 
     def canonical(value: str) -> str:
@@ -9241,6 +9274,15 @@ def _part_prompt_repeats_stem(question, part) -> bool:
 
 def _is_generic_whole_question_label(label: str) -> bool:
     return str(label or "").strip().lower() in {"", "question", "whole question"}
+
+
+def _part_label_is_redundant(question, part) -> bool:
+    """A lone generated 'a' is not a genuine sub-question heading."""
+    parts = list(getattr(question, "parts", []) or [])
+    if len(parts) != 1:
+        return False
+    label = re.sub(r"[().\s]", "", str(getattr(part, "label", "") or "")).lower()
+    return label == "a"
 
 
 def _looks_like_survey_options(text: str) -> bool:
@@ -9672,7 +9714,10 @@ def render_setter_preview(draft: ExamPaperDraft) -> None:
 
             for part in q.parts:
                 label = str(part.label or "").strip()
-                if not _is_generic_whole_question_label(label):
+                if (
+                    not _is_generic_whole_question_label(label)
+                    and not _part_label_is_redundant(q, part)
+                ):
                     if _is_worksheet_draft(draft):
                         st.markdown(f"#### {label}")
                     else:

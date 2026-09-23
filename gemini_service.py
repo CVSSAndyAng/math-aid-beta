@@ -2291,6 +2291,8 @@ STRICT MATHIO STRUCTURE CONTRACT:
 - Construction instructions remain prose; lengths and angles use proper mathematical notation.
 - Roots must use proper notation, e.g. \sqrt[3]{{729}}, not visible text "sqrt[3]{{729}}".
 - Units in prose are plain (cm, kg); units in equation fields use \mathrm{{cm}} etc.
+- Currency amounts are prose. Write $400 or S$400 directly; never write \$400 and never use
+  two currency signs as mathematical delimiters.
 
 MATRIX AND VECTOR NOTATION CONTRACT:
 - Matrices must be returned as mathematical equation content, never Python/list notation such as
@@ -2728,7 +2730,14 @@ Return structured JSON only.
             if len(q.parts) != 1:
                 continue
             part = q.parts[0]
-            if str(part.label or "").strip().lower() not in {"", "question", "whole question"}:
+            raw_label = str(part.label or "").strip().lower()
+            normalized_label = re.sub(r"[().\s]", "", raw_label)
+            if normalized_label == "a":
+                part.label = ""
+                notes.append(
+                    f"Question {q.question_number}: removed a redundant single-part '(a)' label."
+                )
+            elif raw_label not in {"", "question", "whole question"}:
                 continue
             stem_key = canonical(q.stem_text)
             prompt_key = canonical(part.prompt_text)
