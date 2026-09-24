@@ -10249,7 +10249,7 @@ workspace_heading = "Math Buddy" if role_mode == "For Student" else "Math Teache
 workspace_description = (
     "Your space for lesson notes, Mathematics questions and syllabus-based practice."
     if role_mode == "For Student"
-    else "Understand the student's method, find the first reasoning break, advise the student clearly, then build mastery through adaptive practice."
+    else "Create syllabus-aligned assessment papers, generate teacher marking schemes and review the Mathematics syllabus."
 )
 
 st.markdown(
@@ -10297,8 +10297,8 @@ def _topic_coverage_note(topic) -> str:
     return "Offline practice is generated from the compiled learning outcomes for this topic."
 
 if role_mode == "For Teacher":
-    ai_tab, setter_tab, syllabus_tab = st.tabs(
-        ['✨ Analyse', '🧑\u200d🏫 Paper setter', '📚 Syllabus']
+    setter_tab, syllabus_tab = st.tabs(
+        ['🧑\u200d🏫 Paper setter', '📚 Syllabus']
     )
 else:
     student_whiteboard_tab, student_ask_tab, student_practice_tab = st.tabs(
@@ -10872,7 +10872,10 @@ if role_mode == "For Teacher":
 
 if role_mode == "For Teacher":
     # ---------- Gemini online analysis ----------
-    with ai_tab:
+    # The former teacher-side "Question + student working" analysis module is
+    # intentionally disabled. Student working, handwriting and construction
+    # tools remain available only in the Student Workspace.
+    if False:
         st.markdown('<div class="omt-section-kicker">Step 1 · Submit</div>', unsafe_allow_html=True)
         st.markdown('<div class="omt-section-title">Question + student working</div>', unsafe_allow_html=True)
         st.markdown(
