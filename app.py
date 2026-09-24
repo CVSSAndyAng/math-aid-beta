@@ -10249,7 +10249,7 @@ workspace_heading = "Math Buddy" if role_mode == "For Student" else "Math Teache
 workspace_description = (
     "Your space for lesson notes, Mathematics questions and syllabus-based practice."
     if role_mode == "For Student"
-    else "Create syllabus-aligned assessment papers, generate teacher marking schemes and review the Mathematics syllabus."
+    else "Check Mathematics questions, create syllabus-aligned papers, generate teacher marking schemes and review the syllabus."
 )
 
 st.markdown(
@@ -10297,8 +10297,8 @@ def _topic_coverage_note(topic) -> str:
     return "Offline practice is generated from the compiled learning outcomes for this topic."
 
 if role_mode == "For Teacher":
-    setter_tab, syllabus_tab = st.tabs(
-        ['🧑\u200d🏫 Paper setter', '📚 Syllabus']
+    ai_tab, setter_tab, syllabus_tab = st.tabs(
+        ['✅ Check question', '🧑\u200d🏫 Paper setter', '📚 Syllabus']
     )
 else:
     student_whiteboard_tab, student_ask_tab, student_practice_tab = st.tabs(
@@ -10872,18 +10872,24 @@ if role_mode == "For Teacher":
 
 if role_mode == "For Teacher":
     # ---------- Gemini online analysis ----------
-    # The former teacher-side "Question + student working" analysis module is
-    # intentionally disabled. Student working, handwriting and construction
-    # tools remain available only in the Student Workspace.
-    if False:
+    with ai_tab:
         st.markdown('<div class="omt-section-kicker">Step 1 · Submit</div>', unsafe_allow_html=True)
-        st.markdown('<div class="omt-section-title">Question + student working</div>', unsafe_allow_html=True)
+        st.markdown('<div class="omt-section-title">Check a Mathematics question</div>', unsafe_allow_html=True)
         st.markdown(
-            "<div class='omt-section-copy'>Upload a photo/PDF or type the question, then add the student's working. The tutor keeps the question and solution separate during diagnosis.</div>",
+            "<div class='omt-section-copy'>Upload a photo/PDF or type a question to check whether it is complete, consistent, solvable and appropriate for the selected syllabus.</div>",
             unsafe_allow_html=True,
         )
 
-        input_left, input_right = st.columns([.95, 1.05], gap="large")
+        # Discard any student-working analysis retained by an older deployed
+        # version of this session. Question feasibility and guided-solution
+        # state are deliberately preserved.
+        st.session_state.ai_analysis = None
+        st.session_state.ai_visual_explanation = None
+        st.session_state.ai_visual_error = ""
+        st.session_state.ai_error = ""
+        st.session_state.ai_fallback_result = None
+
+        input_left = st.container()
         with input_left:
             with st.container(border=True):
                 st.markdown("#### 📄 Question")
@@ -10896,23 +10902,14 @@ if role_mode == "For Teacher":
                     key="ai_question_files",
                     help="Photos, screenshots and PDFs are supported.",
                 )
-                submission_mode = st.radio(
-                    "How is this question being used?",
-                    [
-                        "Separate student solution",
-                        "Student solution is already on the question upload",
-                        "No student solution — guide me to solve it",
-                    ],
-                    key="ai_submission_mode",
-                    help=(
-                        "Choose whether you want the tutor to mark a separate solution, read working already written "
-                        "on the uploaded question, or teach the question from scratch."
-                    ),
-                )
-                working_in_question_upload = submission_mode == "Student solution is already on the question upload"
-                guided_mode = submission_mode == "No student solution — guide me to solve it"
+                # Teacher question checking no longer accepts or analyses student
+                # working. Guided solving remains available after feasibility.
+                working_in_question_upload = False
+                guided_mode = True
+                w_text, w_input_mode, w_offline_text = "", "No student working", ""
+                w_files = []
 
-        with input_right:
+        if False:
             with st.container(border=True):
                 if guided_mode:
                     st.markdown("#### 🧭 Guided solving")
@@ -10976,9 +10973,9 @@ if role_mode == "For Teacher":
             st.session_state.pop("ai_detected_question_selector", None)
 
         consent = st.checkbox(
-            "Allow Gemini to analyse the selected question and working",
+            "Allow Gemini to check the selected question",
             key="gemini_consent",
-            help="Remove names, NRICs and other unnecessary personal identifiers before sending student work.",
+            help="Remove names, NRICs and other unnecessary personal identifiers before sending an uploaded question.",
         )
 
         selected_detection_index = 0
@@ -10986,7 +10983,7 @@ if role_mode == "For Teacher":
             st.markdown("### Detect questions in the upload")
             st.write(
                 "Gemini can count the **main questions** in the uploaded image/PDF, keep subparts grouped under their main question, "
-                "and let the student choose which question to analyse."
+                "and let the teacher choose which question to check."
             )
             if st.button("Detect questions in uploaded file(s)", use_container_width=True):
                 st.session_state.ai_question_detection = None
@@ -11040,17 +11037,17 @@ if role_mode == "For Teacher":
             st.session_state.ai_visual_step = 0
             clear_ai_practice_state()
 
-        st.markdown("### Check the question before analysis")
+        st.markdown("### Check the question")
         st.write(
             "Gemini can first check whether the selected question is complete, internally consistent, "
-            "mathematically meaningful, and sufficiently clear before marking or guiding the student."
+            "mathematically meaningful, sufficiently clear and suitable for guided solving."
         )
         bypass_feasibility = st.checkbox(
             "Bypass question feasibility check",
             key="ai_bypass_feasibility",
             help=(
                 "Use this only when you already trust the question. Independent mathematical verification still runs "
-                "before the tutor marks or guides the solution."
+                "before the tutor guides the solution."
             ),
         )
         if bypass_feasibility:
@@ -11133,7 +11130,7 @@ if role_mode == "For Teacher":
                 "using guided hints and step-by-step support."
             )
 
-        primary_action_label = "Analyse student working / Advise how to solve the question"
+        primary_action_label = "Advise how to solve the question"
         if st.button(
             primary_action_label,
             type="primary",
