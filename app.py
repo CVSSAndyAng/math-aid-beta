@@ -9803,7 +9803,19 @@ def uploaded_assets(files: list[Any] | None) -> list[UploadedAsset]:
 
 def question_file_signature(files: list[Any] | None) -> str:
     files = files or []
-    return "|".join(f"{getattr(f, 'name', '')}:{getattr(f, 'size', 0)}:{getattr(f, 'type', '')}" for f in files)
+    signatures: list[str] = []
+    for f in files:
+        try:
+            data = f.getvalue()
+            content_digest = hashlib.sha256(data).hexdigest()[:16]
+            size = len(data)
+        except Exception:
+            content_digest = "unreadable"
+            size = int(getattr(f, "size", 0) or 0)
+        signatures.append(
+            f"{getattr(f, 'name', '')}:{size}:{getattr(f, 'type', '')}:{content_digest}"
+        )
+    return "|".join(signatures)
 
 
 def detected_question_context(detection: QuestionDetectionResult, index: int) -> str:
@@ -10895,13 +10907,25 @@ if role_mode == "For Teacher":
                 st.markdown("#### 📄 Question")
                 q_text = question_input_with_math_keyboard(key_base="ai_question")
                 geogebra_external_tools(question_text=q_text, key_base="ai_geogebra")
-                q_files = st.file_uploader(
+                q_camera_file = st.camera_input(
+                    "Take a photo of the question",
+                    key="ai_question_camera",
+                    help=(
+                        "Allow camera access when prompted. On a phone or tablet, use the camera selector "
+                        "to choose the outward-facing camera."
+                    ),
+                )
+                q_uploaded_files = st.file_uploader(
                     "Upload question image/PDF",
                     type=["png", "jpg", "jpeg", "webp", "pdf"],
                     accept_multiple_files=True,
                     key="ai_question_files",
-                    help="Photos, screenshots and PDFs are supported.",
+                    help="Photos, screenshots and PDFs are supported. You may combine a camera photo with uploaded pages.",
                 )
+                q_files = list(q_uploaded_files or [])
+                if q_camera_file is not None:
+                    q_files.insert(0, q_camera_file)
+                    st.caption("Camera photo attached and ready for Check Question.")
                 # Teacher question checking no longer accepts or analyses student
                 # working. Guided solving remains available after feasibility.
                 working_in_question_upload = False
