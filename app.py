@@ -10308,13 +10308,89 @@ def _topic_coverage_note(topic) -> str:
 
     return "Offline practice is generated from the compiled learning outcomes for this topic."
 
+
+DEFAULT_VIDEO_RESOURCES_DRIVE_FOLDER_URL = (
+    "https://drive.google.com/drive/u/0/folders/1ogBVJobMqMvFIwOMlfsEcqcAkF88q61G"
+)
+
+
+def _video_resources_drive_config() -> tuple[str, str]:
+    """Return a validated Google Drive folder id and optional resource key."""
+    configured = ""
+    for key in ("VIDEO_RESOURCES_DRIVE_FOLDER_URL", "VIDEO_RESOURCES_DRIVE_FOLDER_ID"):
+        configured = str(os.getenv(key, "") or "").strip()
+        if configured:
+            break
+        try:
+            configured = str(st.secrets.get(key, "") or "").strip()
+        except Exception:
+            configured = ""
+        if configured:
+            break
+
+    if not configured:
+        configured = DEFAULT_VIDEO_RESOURCES_DRIVE_FOLDER_URL
+
+    folder_match = re.search(r"/folders/([A-Za-z0-9_-]+)", configured)
+    if folder_match is None:
+        folder_match = re.search(r"[?&]id=([A-Za-z0-9_-]+)", configured)
+    folder_id = folder_match.group(1) if folder_match else configured
+    if not re.fullmatch(r"[A-Za-z0-9_-]{10,}", folder_id):
+        return "", ""
+
+    resource_match = re.search(r"[?&]resourcekey=([A-Za-z0-9_-]+)", configured)
+    resource_key = resource_match.group(1) if resource_match else ""
+    return folder_id, resource_key
+
+
+def render_student_video_resources() -> None:
+    """Show the configured Drive video folder without consuming API quota."""
+    st.subheader("🎬 Video Resources")
+    st.caption(
+        "Watch the Mathematics videos selected by your teacher. "
+        "Viewing these resources does not use Gemini credits."
+    )
+
+    folder_id, resource_key = _video_resources_drive_config()
+    if not folder_id:
+        st.info("The Video Resources folder has not been connected yet.")
+        with st.expander("Teacher setup", expanded=False):
+            st.write(
+                "Share the Google Drive folder with the intended students as viewers, then add its folder link "
+                "to Streamlit Secrets using:"
+            )
+            st.code(
+                'VIDEO_RESOURCES_DRIVE_FOLDER_URL = "https://drive.google.com/drive/folders/YOUR_FOLDER_ID"',
+                language="toml",
+            )
+        return
+
+    query = {"id": folder_id}
+    if resource_key:
+        query["resourcekey"] = resource_key
+    embedded_url = f"https://drive.google.com/embeddedfolderview?{urlencode(query)}#grid"
+    folder_url = f"https://drive.google.com/drive/folders/{folder_id}"
+    if resource_key:
+        folder_url += "?" + urlencode({"resourcekey": resource_key})
+
+    st.link_button(
+        "Open video folder in Google Drive",
+        folder_url,
+        use_container_width=True,
+    )
+    st_components_v1.iframe(embedded_url, height=720, scrolling=True)
+    st.caption(
+        "If a video does not open inside the panel, use the button above. "
+        "School-restricted folders require the student to be signed in to the permitted Google account."
+    )
+
 if role_mode == "For Teacher":
     ai_tab, setter_tab, syllabus_tab = st.tabs(
         ['✅ Check question', '🧑\u200d🏫 Paper setter', '📚 Syllabus']
     )
 else:
-    student_whiteboard_tab, student_ask_tab, student_practice_tab = st.tabs(
-        ["📝 Lesson whiteboard", "💬 Ask Math Advisor", "🧠 Offline practice"]
+    student_whiteboard_tab, student_ask_tab, student_practice_tab, student_video_tab = st.tabs(
+        ["📝 Lesson whiteboard", "💬 Ask Math Advisor", "🧠 Offline practice", "🎬 Video Resources"]
     )
 
 
@@ -12769,6 +12845,9 @@ def render_student_ask_guided_solution(g: GuidedSolution) -> None:
 
 
 if role_mode == "For Student":
+    with student_video_tab:
+        render_student_video_resources()
+
     with student_practice_tab:
         st.subheader("No-credit syllabus-generated practice")
         st.caption("This tab never calls Gemini. It keeps working even if the API key is missing or a free-tier quota is reached.")
